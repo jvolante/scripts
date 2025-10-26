@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+set -e
+
+remotes=$(git remote -v | grep \(push\)\$)
+origin_remote=$(echo "$remotes" | grep origin)
+
+if [[ ${#origin_remote} -ne 0 ]]; then
+    remote=origin_remote
+else
+    remote=$(echo "$remotes" | head -1)
+fi
+
+url=$(echo "$remote" | sed 's|[A-z0-9]\+  [A-z]\+@\([A-z0-9_-]\+\.[A-z0-9]\+\):\([A-z/_-]\+\)\.\w\+ .*$|\1/\2|g')
+echo "$url"

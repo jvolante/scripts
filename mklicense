@@ -1,0 +1,33 @@
+#!/usr/bin/env bash
+
+set -e
+
+AGPL_CHOICE="AGPL (Latest)"
+GPL_CHOICE="GPL (Latest)"
+LGPL_CHOICE="LGPL (Latest)"
+GFD_CHOICE="GNU Free Documentation License (Latest)"
+
+LICENCES=(
+  "$AGPL_CHOICE"
+  "$GPL_CHOICE"
+  "$LGPL_CHOICE"
+  "$GFD_CHOICE"
+)
+
+AGPL_LINK="https://www.gnu.org/licenses/agpl.txt"
+GPL_LINK="https://www.gnu.org/licenses/gpl.txt"
+LGPL_LINK="https://www.gnu.org/licenses/lgpl.txt"
+GFD_LINK="https://www.gnu.org/licenses/fdl.txt"
+
+select license in "${LICENCES[@]}"; do
+    case "$license" in
+        "$AGPL_CHOICE") curl --location "$AGPL_LINK" > LICENSE
+                        break ;;
+         "$GPL_CHOICE") curl --location "$GPL_LINK" > LICENSE
+                        break ;;
+        "$LGPL_CHOICE") curl --location "$LGPL_LINK" > LICENSE
+                        break ;;
+         "$GFD_CHOICE") curl --location "$GFD_LINK" > LICENSE
+                        break ;;
+    esac
+done
