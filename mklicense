@@ -2,32 +2,57 @@
 
 set -e
 
+user_full_name() {
+  user_record="$(getent passwd $USER)"
+  user_gecos_field="$(echo "$user_record" | cut -d ':' -f 5)"
+  echo "$user_gecos_field" | cut -d ',' -f 1
+}
+
+current_year() {
+  date +%Y
+}
+
 AGPL_CHOICE="AGPL (Latest)"
 GPL_CHOICE="GPL (Latest)"
 LGPL_CHOICE="LGPL (Latest)"
 GFD_CHOICE="GNU Free Documentation License (Latest)"
+APACHE_CHOICE="Apache 2.0"
 
 LICENCES=(
   "$AGPL_CHOICE"
   "$GPL_CHOICE"
   "$LGPL_CHOICE"
   "$GFD_CHOICE"
+  "$APACHE_CHOICE"
 )
 
 AGPL_LINK="https://www.gnu.org/licenses/agpl.txt"
 GPL_LINK="https://www.gnu.org/licenses/gpl.txt"
 LGPL_LINK="https://www.gnu.org/licenses/lgpl.txt"
 GFD_LINK="https://www.gnu.org/licenses/fdl.txt"
+APACHE_LINK="https://www.apache.org/licenses/LICENSE-2.0.txt"
 
 select license in "${LICENCES[@]}"; do
-    case "$license" in
-        "$AGPL_CHOICE") curl --location "$AGPL_LINK" > LICENSE
-                        break ;;
-         "$GPL_CHOICE") curl --location "$GPL_LINK" > LICENSE
-                        break ;;
-        "$LGPL_CHOICE") curl --location "$LGPL_LINK" > LICENSE
-                        break ;;
-         "$GFD_CHOICE") curl --location "$GFD_LINK" > LICENSE
-                        break ;;
-    esac
+  case "$license" in
+  "$AGPL_CHOICE")
+    curl --location "$AGPL_LINK" >LICENSE
+    break
+    ;;
+  "$GPL_CHOICE")
+    curl --location "$GPL_LINK" >LICENSE
+    break
+    ;;
+  "$LGPL_CHOICE")
+    curl --location "$LGPL_LINK" >LICENSE
+    break
+    ;;
+  "$GFD_CHOICE")
+    curl --location "$GFD_LINK" >LICENSE
+    break
+    ;;
+  "$APACHE_CHOICE")
+    curl --location "$APACHE_LINK" | sed 's|\[yyyy\]|'"$(current_year)"'|' | sed 's|\[name of copyright owner\]|'"$(user_full_name)"'|' > LICENSE
+    break
+    ;;
+  esac
 done
