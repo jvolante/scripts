@@ -1,0 +1,335 @@
+#!/usr/bin/env bash
+# gmv - Intelligent move command that uses git mv for tracked files, mv otherwise
+# Combines functionality of both mv and git mv commands
+
+set -euo pipefail
+
+# Function to check if we're in a git repository
+in_git_repo() {
+    git rev-parse --is-inside-work-tree &>/dev/null
+}
+
+# Function to check if a file is tracked by git
+is_tracked() {
+    local file="$1"
+    git ls-files --error-unmatch "$file" &>/dev/null
+}
+
+# Function to get the git root directory
+get_git_root() {
+    git rev-parse --show-toplevel 2>/dev/null
+}
+
+# Parse arguments
+declare -a sources=()
+declare -a mv_args=()
+declare -a git_mv_args=()
+destination=""
+use_target_dir=0
+target_directory=""
+# Variables to track which options were specified
+# shellcheck disable=SC2034  # These track state even if not directly used
+force=0
+verbose=0
+interactive=0
+no_clobber=0
+dry_run=0
+skip_errors=0
+update=0
+no_target_directory=0
+backup=""
+suffix=""
+strip_trailing_slashes=0
+context=0
+
+# Parse options
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        -f|--force)
+            # shellcheck disable=SC2034
+            force=1
+            mv_args+=("-f")
+            git_mv_args+=("-f")
+            shift
+            ;;
+        -v|--verbose)
+            verbose=1
+            mv_args+=("-v")
+            git_mv_args+=("-v")
+            shift
+            ;;
+        -i|--interactive)
+            interactive=1
+            mv_args+=("-i")
+            shift
+            ;;
+        -n|--no-clobber)
+            # This is ambiguous: mv uses -n for no-clobber, git mv for dry-run
+            # Check if next arg looks like a file/option to determine intent
+            if in_git_repo && [[ ${2:-} != -* ]] && [[ -n ${2:-} ]]; then
+                # Likely meant as dry-run for git mv
+                dry_run=1
+                git_mv_args+=("-n")
+            else
+                # Likely meant as no-clobber for mv
+                # shellcheck disable=SC2034
+                no_clobber=1
+                mv_args+=("-n")
+            fi
+            shift
+            ;;
+        --dry-run)
+            dry_run=1
+            git_mv_args+=("-n")
+            shift
+            ;;
+        -k)
+            skip_errors=1
+            git_mv_args+=("-k")
+            shift
+            ;;
+        -t|--target-directory)
+            use_target_dir=1
+            target_directory="$2"
+            mv_args+=("-t" "$2")
+            shift 2
+            ;;
+        --target-directory=*)
+            use_target_dir=1
+            target_directory="${1#*=}"
+            mv_args+=("$1")
+            shift
+            ;;
+        -T|--no-target-directory)
+            no_target_directory=1
+            mv_args+=("-T")
+            shift
+            ;;
+        -u|--update)
+            update=1
+            mv_args+=("-u")
+            shift
+            ;;
+        -b|--backup)
+            # shellcheck disable=SC2034
+            backup="simple"
+            mv_args+=("$1")
+            shift
+            ;;
+        --backup=*)
+            # shellcheck disable=SC2034
+            backup="${1#*=}"
+            mv_args+=("$1")
+            shift
+            ;;
+        -S|--suffix)
+            # shellcheck disable=SC2034
+            suffix="$2"
+            mv_args+=("-S" "$2")
+            shift 2
+            ;;
+        --suffix=*)
+            # shellcheck disable=SC2034
+            suffix="${1#*=}"
+            mv_args+=("$1")
+            shift
+            ;;
+        --strip-trailing-slashes)
+            # shellcheck disable=SC2034
+            strip_trailing_slashes=1
+            mv_args+=("$1")
+            shift
+            ;;
+        -Z|--context)
+            # shellcheck disable=SC2034
+            context=1
+            mv_args+=("$1")
+            shift
+            ;;
+        --help)
+            cat <<'EOF'
+gmv - Intelligent move command
+
+Usage: gmv [OPTION]... SOURCE... DEST
+       gmv [OPTION]... -t DIRECTORY SOURCE...
+
+Intelligently uses 'git mv' for git-tracked files within a repository,
+and regular 'mv' otherwise.
+
+Common Options (work with both mv and git mv):
+  -f, --force          Force move/overwrite without prompting
+  -v, --verbose        Explain what is being done
+  -n                   For git: dry-run; For mv: no-clobber
+
+mv-specific Options:
+  -i, --interactive    Prompt before overwrite
+  -t, --target-directory=DIR  Move all sources into DIR
+  -T, --no-target-directory   Treat DEST as normal file
+  -u, --update         Move only when source is newer
+  -b, --backup[=CONTROL]      Make backup of existing files
+  -S, --suffix=SUFFIX         Override backup suffix
+  --strip-trailing-slashes    Remove trailing slashes from sources
+  -Z, --context               Set SELinux security context
+
+git mv-specific Options:
+  -k                   Skip moves that would cause errors
+  --dry-run            Show what would happen (explicit dry-run)
+
+Examples:
+  gmv file.txt newname.txt        # Rename file (uses git mv if tracked)
+  gmv -v src/*.c dest/            # Move multiple files verbosely
+  gmv -f old.txt new.txt          # Force overwrite
+  gmv --dry-run test.c src/       # Show what would happen (in git repo)
+
+EOF
+            exit 0
+            ;;
+        --version)
+            echo "gmv 1.0 - Intelligent git-aware move command"
+            exit 0
+            ;;
+        -*)
+            echo "gmv: unrecognized option '$1'" >&2
+            echo "Try 'gmv --help' for more information." >&2
+            exit 1
+            ;;
+        *)
+            sources+=("$1")
+            shift
+            ;;
+    esac
+done
+
+# Validate arguments
+if [[ ${#sources[@]} -eq 0 ]]; then
+    echo "gmv: missing file operand" >&2
+    echo "Try 'gmv --help' for more information." >&2
+    exit 1
+fi
+
+if [[ $use_target_dir -eq 0 ]]; then
+    if [[ ${#sources[@]} -lt 2 ]]; then
+        echo "gmv: missing destination file operand after '${sources[0]}'" >&2
+        echo "Try 'gmv --help' for more information." >&2
+        exit 1
+    fi
+    # Last argument is destination
+    destination="${sources[-1]}"
+    unset 'sources[-1]'
+else
+    destination="$target_directory"
+fi
+
+# Main logic: decide whether to use git mv or regular mv
+if in_git_repo; then
+    # shellcheck disable=SC2034  # git_root reserved for future use
+    git_root=$(get_git_root)
+    use_git_mv=1
+    mixed_mode=0
+
+    # Check if all sources are tracked and within git repo
+    for source in "${sources[@]}"; do
+        if [[ ! -e "$source" ]]; then
+            # File doesn't exist - let git mv or mv handle the error
+            if ! is_tracked "$source" 2>/dev/null; then
+                use_git_mv=0
+                break
+            fi
+        else
+            # Check if file is tracked
+            if ! is_tracked "$source"; then
+                # At least one file is untracked
+                if [[ ${#sources[@]} -eq 1 ]]; then
+                    # Single untracked file - use regular mv
+                    use_git_mv=0
+                else
+                    # Multiple files with mixed tracked status
+                    mixed_mode=1
+                fi
+            fi
+        fi
+    done
+
+    if [[ $mixed_mode -eq 1 ]]; then
+        # Handle mixed tracked/untracked files by processing individually
+        for source in "${sources[@]}"; do
+            if is_tracked "$source" 2>/dev/null; then
+                # Use git mv for tracked files
+                if [[ $dry_run -eq 1 ]]; then
+                    echo "Would git mv: $source -> $destination"
+                else
+                    git mv "${git_mv_args[@]}" "$source" "$destination"
+                fi
+            else
+                # Use regular mv for untracked files
+                if [[ $dry_run -eq 1 ]]; then
+                    echo "Would mv: $source -> $destination"
+                else
+                    mv "${mv_args[@]}" "$source" "$destination"
+                fi
+            fi
+        done
+        exit 0
+    fi
+
+    if [[ $use_git_mv -eq 1 ]]; then
+        # All files are tracked, use git mv
+        # Handle mv-specific options that git mv doesn't support
+        if [[ $interactive -eq 1 || $update -eq 1 || -n $backup || $no_target_directory -eq 1 ]]; then
+            # These options require regular mv
+            if [[ $verbose -eq 1 ]]; then
+                echo "gmv: using 'mv' due to mv-specific options" >&2
+            fi
+            if [[ $dry_run -eq 1 ]]; then
+                echo "Would execute: mv ${mv_args[*]} ${sources[*]} $destination"
+                # Also need to manually stage
+                echo "Would execute: git add -A"
+            else
+                mv "${mv_args[@]}" "${sources[@]}" "$destination"
+                # Stage the changes in git
+                git add -A
+            fi
+        else
+            # Use git mv directly
+            if [[ $dry_run -eq 1 ]]; then
+                git mv "${git_mv_args[@]}" "${sources[@]}" "$destination"
+            else
+                git mv "${git_mv_args[@]}" "${sources[@]}" "$destination"
+            fi
+        fi
+        exit 0
+    fi
+fi
+
+# Not in git repo or files not tracked - use regular mv
+# Handle git-specific options
+if [[ $skip_errors -eq 1 ]]; then
+    # Emulate -k flag by trying each move individually
+    exit_code=0
+    for source in "${sources[@]}"; do
+        if [[ $dry_run -eq 1 ]]; then
+            if [[ -e "$source" ]]; then
+                echo "Would mv: $source -> $destination"
+            else
+                echo "Would skip (not found): $source" >&2
+                exit_code=1
+            fi
+        else
+            if ! mv "${mv_args[@]}" "$source" "$destination" 2>/dev/null; then
+                if [[ $verbose -eq 1 ]]; then
+                    echo "Skipped (error): $source" >&2
+                fi
+                exit_code=1
+            fi
+        fi
+    done
+    exit $exit_code
+elif [[ $dry_run -eq 1 ]]; then
+    # Emulate dry-run
+    for source in "${sources[@]}"; do
+        echo "Would mv: $source -> $destination"
+    done
+else
+    # Standard mv
+    mv "${mv_args[@]}" "${sources[@]}" "$destination"
+fi

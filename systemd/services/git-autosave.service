@@ -1,0 +1,19 @@
+[Unit]
+Description=Git Auto-Save on Logout
+Documentation=file://%h/jvscripts/systemd/services/README.md
+# Ensure this runs before the session ends
+Before=shutdown.target
+
+[Service]
+Type=oneshot
+# ExecStart does nothing, just marks service as active
+ExecStart=/bin/true
+# ExecStop runs when user session ends (logout/shutdown)
+ExecStop=%h/jvscripts/systemd/services/git-autosave.sh
+# Keep the service "active" so ExecStop runs on logout
+RemainAfterExit=yes
+# Give the script time to complete (max 5 minutes)
+TimeoutStopSec=300
+
+[Install]
+WantedBy=default.target

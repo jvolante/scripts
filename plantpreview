@@ -1,0 +1,60 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Script to watch for PlantUML file changes and display previews with timg
+# Usage: ./watch-puml.sh [directory]
+
+WATCH_DIR="${1:-.}"
+TEMP_DIR=$(mktemp -d)
+
+trap 'rm -rf "$TEMP_DIR"' EXIT
+
+# Check for required tools
+for tool in inotifywait plantuml timg; do
+    if ! command -v "$tool" &> /dev/null; then
+        echo "Error: $tool is not installed" >&2
+        exit 1
+    fi
+done
+
+echo "Watching for .puml files in: $WATCH_DIR"
+echo "Press Ctrl+C to stop"
+echo ""
+
+# Function to render and display a PlantUML file
+render_and_display() {
+    local puml_file="$1"
+    local basename=$(basename "$puml_file" .puml)
+    local output_png="$TEMP_DIR/${basename}.png"
+
+    echo "[$(date '+%H:%M:%S')] Processing: $puml_file"
+
+    # Render PlantUML to PNG
+    if plantuml -tpng -o "$TEMP_DIR" "$puml_file" 2>&1; then
+        # Display with timg
+        if [ -f "$output_png" ]; then
+            timg "$output_png"
+            echo ""
+        else
+            echo "Error: Failed to generate $output_png" >&2
+        fi
+    else
+        echo "Error: Failed to render $puml_file" >&2
+    fi
+}
+
+# Initial render of all existing .puml files
+shopt -s nullglob
+for file in "$WATCH_DIR"/*.puml; do
+    if [ -f "$file" ]; then
+        render_and_display "$file"
+    fi
+done
+
+# Watch for changes
+inotifywait -m -e close_write,moved_to -r "$WATCH_DIR" --include '\.puml$' |
+while read -r directory event filename; do
+    if [[ "$filename" == *.puml ]]; then
+        render_and_display "${directory}${filename}"
+    fi
+done
