@@ -3,8 +3,8 @@
 
 set -u
 
-if [[ $# -eq 0 ]] || [[ $# -gt 2 ]]; then
-  echo "Usage: $(basename "$0") <user@host:path> [remote-name]"
+if [[ $# -eq 0 ]] || [[ $# -gt 3 ]]; then
+  echo "Usage: $(basename "$0") <user@host:path> [remote-name] [repo-dir]"
   exit 1
 fi
 
@@ -15,7 +15,7 @@ if [[ "$REMOTE_URL" != *":"* ]]; then
 fi
 REMOTE_NAME=${2:-origin}
 
-REPO_DIR="$(pwd)"
+REPO_DIR="${3:-$(pwd)}"
 
 gitc () {
   git -C "$REPO_DIR" "$@"
