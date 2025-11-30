@@ -1,0 +1,51 @@
+#!/usr/bin/env bash
+# Script to set up a git remote via ssh on a server
+
+set -u
+
+if [[ $# -eq 0 ]] || [[ $# -gt 2 ]]; then
+  echo "Usage: $(basename "$0") <user@host:path> [remote-name]"
+  exit 1
+fi
+
+REMOTE_URL=$1
+if [[ "$REMOTE_URL" != *":"* ]]; then
+    echo "Error: Remote URL must be in the format user@host:path"
+    exit 1
+fi
+REMOTE_NAME=${2:-origin}
+
+REPO_DIR="$(pwd)"
+
+gitc () {
+  git -C "$REPO_DIR" "$@"
+}
+
+gitc remote | grep "\<$REMOTE_NAME\>" > /dev/null
+if [[ $? -eq 0 ]]; then
+  echo "Remote $REMOTE_NAME already exists"
+  exit 1
+fi
+
+# Find git root, init repo if it doesn't exist
+GIT_ROOT=$(gitc rev-parse --show-toplevel)
+if [[ $? -eq 128 ]]; then
+  set -e
+
+  echo "$REPO_DIR was not a git repository, initializing..."
+  gitc init
+  GIT_ROOT=$(gitc rev-parse --show-toplevel)
+  echo "Successfully initialized repository at $REPO_DIR"
+fi
+
+set -e
+
+REPO_NAME="$(basename "$GIT_ROOT")".git
+REMOTE_URL="$REMOTE_URL/$REPO_NAME"
+echo "Creating bare repo at: $REMOTE_URL"
+REMOTE_PATH=${REMOTE_URL##*:}
+REMOTE_CMD=$(printf 'set -e; mkdir -p %q && git -C %q init --bare' "$REMOTE_PATH" "$REMOTE_PATH")
+ssh "${REMOTE_URL%:*}" "$REMOTE_CMD"
+
+gitc remote add "$REMOTE_NAME" "$REMOTE_URL"
+gitc push --mirror --set-upstream "$REMOTE_NAME"
