@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# gmv - Intelligent move command that uses git mv for tracked files, mv otherwise
+# omnimv - Intelligent move command that uses git mv for tracked files, mv otherwise
 # Combines functionality of both mv and git mv commands
 
 set -euo pipefail
@@ -148,10 +148,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --help)
             cat <<'EOF'
-gmv - Intelligent move command
+omnimv - Intelligent move command
 
-Usage: gmv [OPTION]... SOURCE... DEST
-       gmv [OPTION]... -t DIRECTORY SOURCE...
+Usage: omnimv [OPTION]... SOURCE... DEST
+       omnimv [OPTION]... -t DIRECTORY SOURCE...
 
 Intelligently uses 'git mv' for git-tracked files within a repository,
 and regular 'mv' otherwise.
@@ -176,21 +176,21 @@ git mv-specific Options:
   --dry-run            Show what would happen (explicit dry-run)
 
 Examples:
-  gmv file.txt newname.txt        # Rename file (uses git mv if tracked)
-  gmv -v src/*.c dest/            # Move multiple files verbosely
-  gmv -f old.txt new.txt          # Force overwrite
-  gmv --dry-run test.c src/       # Show what would happen (in git repo)
+  omnimv file.txt newname.txt        # Rename file (uses git mv if tracked)
+  omnimv -v src/*.c dest/            # Move multiple files verbosely
+  omnimv -f old.txt new.txt          # Force overwrite
+  omnimv --dry-run test.c src/       # Show what would happen (in git repo)
 
 EOF
             exit 0
             ;;
         --version)
-            echo "gmv 1.0 - Intelligent git-aware move command"
+            echo "omnimv 1.0 - Intelligent git-aware move command"
             exit 0
             ;;
         -*)
-            echo "gmv: unrecognized option '$1'" >&2
-            echo "Try 'gmv --help' for more information." >&2
+            echo "omnimv: unrecognized option '$1'" >&2
+            echo "Try 'omnimv --help' for more information." >&2
             exit 1
             ;;
         *)
@@ -202,15 +202,15 @@ done
 
 # Validate arguments
 if [[ ${#sources[@]} -eq 0 ]]; then
-    echo "gmv: missing file operand" >&2
-    echo "Try 'gmv --help' for more information." >&2
+    echo "omnimv: missing file operand" >&2
+    echo "Try 'omnimv --help' for more information." >&2
     exit 1
 fi
 
 if [[ $use_target_dir -eq 0 ]]; then
     if [[ ${#sources[@]} -lt 2 ]]; then
-        echo "gmv: missing destination file operand after '${sources[0]}'" >&2
-        echo "Try 'gmv --help' for more information." >&2
+        echo "omnimv: missing destination file operand after '${sources[0]}'" >&2
+        echo "Try 'omnimv --help' for more information." >&2
         exit 1
     fi
     # Last argument is destination
@@ -278,7 +278,7 @@ if in_git_repo; then
         if [[ $interactive -eq 1 || $update -eq 1 || -n $backup || $no_target_directory -eq 1 ]]; then
             # These options require regular mv
             if [[ $verbose -eq 1 ]]; then
-                echo "gmv: using 'mv' due to mv-specific options" >&2
+                echo "omnimv: using 'mv' due to mv-specific options" >&2
             fi
             if [[ $dry_run -eq 1 ]]; then
                 echo "Would execute: mv ${mv_args[*]} ${sources[*]} $destination"
