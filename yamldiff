@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+
+# Check that exactly two arguments are provided.
+if [ "$#" -ne 2 ]; then
+  echo "Usage: $0 file1.yaml file2.yaml"
+  exit 1
+fi
+
+FILE1="$1"
+FILE2="$2"
+
+# Use process substitution with yq's key-sorting function.
+# Note: This requires a version of yq that supports the sort_keys() function.
+diff <(yq eval 'sort_keys(.)' "$FILE1") <(yq eval 'sort_keys(.)' "$FILE2")
