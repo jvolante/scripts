@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
 # This script automates the process of ripping music CDs using abcde.
 # It rips the CD, organizes the files, ejects the CD, and waits for a new one.

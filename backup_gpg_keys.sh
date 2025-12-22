@@ -13,7 +13,7 @@ echo "with their current passphrase."
 echo
 
 # Create a timestamped directory for the backup
-BACKUP_DIR="gpg_backup_$(date +%Y-%m-%d_%H-%M-%S)"
+BACKUP_DIR="gpg_backup_$(date --utc +%Y-%m-%d_%H-%M-%S)"
 ARCHIVE_NAME="${BACKUP_DIR}.tar.gz"
 
 mkdir "$BACKUP_DIR"

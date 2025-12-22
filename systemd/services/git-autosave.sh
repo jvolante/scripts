@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
 # Git Auto-Save on Logout
 # Searches for git repos with untracked/uncommitted changes and pushes them to automation branches

@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
 # Default number of parallel jobs to the number of CPU cores
 DEFAULT_JOBS=$(nproc 2>/dev/null || echo 4)
@@ -51,7 +51,7 @@ convert_one() {
     echo "[CONVERTING] '$image_file' -> '$jxl_file'"
 
     # Attempt conversion
-    if cjxl "$image_file" "$jxl_file" "${cjxl_args[@]}"; then
+    if cjxl "$image_file" "$jxl_file" "${cjxl_args[@]}" 2> /dev/null; then
         echo "[SUCCESS] Converted '$image_file'. Deleting original."
         if ! rm "$image_file"; then
             echo "[ERROR] Failed to delete original file '$image_file' after successful conversion."
@@ -143,7 +143,7 @@ if [[ ${#cjxl_options[@]} -gt 0 ]]; then
 fi
 echo "---------------------------------"
 
-find "${directories[@]}" -type f \(
+find "${directories[@]}" -type f \( \
     -iname "*.jpg" -o -iname "*.jpeg" -o -iname "*.png" -o \
     -iname "*.gif" -o -iname "*.apng" -o \
     -iname "*.bmp" -o -iname "*.tiff" -o -iname "*.tif" -o \
@@ -160,6 +160,7 @@ done
 
 # Wait for all remaining background jobs to complete
 wait
+sleep .1
 
 # --- Report Failures ---
 if [[ -s "$failure_log" ]]; then

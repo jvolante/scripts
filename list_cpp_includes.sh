@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # Script to list unique #include paths for C++ source and header files in directories
 # Usage: ./list_cpp_includes.sh [-g|--global] [-l|--local] [--no-stl] [-H|--headers-only] <dir1> [dir2] [dir3] ...
 
