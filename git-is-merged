@@ -1,0 +1,128 @@
+#!/usr/bin/env bash
+# Check if a git branch has been merged into another branch
+#
+# Usage: git-is-merged [source-branch] [target-branch]
+#   source-branch: Branch to check (default: current branch)
+#   target-branch: Branch to check against (default: repository default branch)
+#
+# Detects:
+#   - Regular merge commits
+#   - Squash merges
+#   - Rebase merges
+
+set -euo pipefail
+
+# Get the source branch (default to current branch)
+if [ -n "${1:-}" ]; then
+    SOURCE_BRANCH="$1"
+else
+    SOURCE_BRANCH=$(git rev-parse --abbrev-ref HEAD)
+fi
+
+# Get the target branch (default to repository default branch)
+if [ -n "${2:-}" ]; then
+    TARGET_BRANCH="$2"
+else
+    # Try to get the default branch from remote
+    TARGET_BRANCH=$(git symbolic-ref refs/remotes/origin/HEAD 2>/dev/null | sed 's@^refs/remotes/origin/@@' || echo "master")
+fi
+
+echo "Checking if branch '$SOURCE_BRANCH' has been merged into '$TARGET_BRANCH'..."
+
+# Check if both branches exist
+if ! git rev-parse --verify "$SOURCE_BRANCH" >/dev/null 2>&1; then
+    echo "Error: Branch '$SOURCE_BRANCH' does not exist" >&2
+    exit 1
+fi
+
+if ! git rev-parse --verify "$TARGET_BRANCH" >/dev/null 2>&1; then
+    echo "Error: Branch '$TARGET_BRANCH' does not exist" >&2
+    exit 1
+fi
+
+# Get the merge base
+MERGE_BASE=$(git merge-base "$SOURCE_BRANCH" "$TARGET_BRANCH")
+
+# Get the commit hash of the source branch
+SOURCE_COMMIT=$(git rev-parse "$SOURCE_BRANCH")
+
+# Method 1: Check if merge base equals source commit (regular merge)
+if [ "$MERGE_BASE" = "$SOURCE_COMMIT" ]; then
+    echo "✓ Branch '$SOURCE_BRANCH' has been merged into '$TARGET_BRANCH' (regular merge)"
+    exit 0
+fi
+
+# Method 2: Check patch-ids to detect rebase merges
+# Get patch-ids for all commits in source branch not in target
+SOURCE_PATCH_IDS=$(git log "$TARGET_BRANCH".."$SOURCE_BRANCH" --pretty=format:"%H" | \
+    while read -r commit; do
+        git show "$commit" | git patch-id --stable
+    done | awk '{print $1}' | sort)
+
+if [ -z "$SOURCE_PATCH_IDS" ]; then
+    # No commits to check
+    echo "✓ Branch '$SOURCE_BRANCH' has been merged into '$TARGET_BRANCH'"
+    exit 0
+fi
+
+# Get patch-ids for recent commits in target branch
+# Check commits since the merge base to avoid scanning entire history
+TARGET_PATCH_IDS=$(git log "$MERGE_BASE".."$TARGET_BRANCH" --pretty=format:"%H" | \
+    while read -r commit; do
+        git show "$commit" | git patch-id --stable
+    done | awk '{print $1}' | sort)
+
+# Check if all source patch-ids exist in target
+ALL_FOUND=true
+while IFS= read -r patch_id; do
+    if ! echo "$TARGET_PATCH_IDS" | grep -q "^$patch_id$"; then
+        ALL_FOUND=false
+        break
+    fi
+done <<< "$SOURCE_PATCH_IDS"
+
+if [ "$ALL_FOUND" = true ]; then
+    echo "✓ Branch '$SOURCE_BRANCH' has been merged into '$TARGET_BRANCH' (rebase merge detected via patch-id)"
+    exit 0
+fi
+
+# Method 3: Check if the cumulative diff is empty (squash merge)
+# Compare the tree state: if target branch contains all changes from source,
+# the diff between (merge-base + source changes) and target should be minimal
+DIFF_OUTPUT=$(git diff "$MERGE_BASE" "$SOURCE_BRANCH" | git apply --check --cached 2>&1 || true)
+
+# Create a temporary tree with source changes applied to target
+# Check if the changes in source are already in target
+if git diff "$MERGE_BASE".."$SOURCE_BRANCH" --quiet 2>/dev/null; then
+    # No actual changes between merge base and source
+    echo "✓ Branch '$SOURCE_BRANCH' has been merged into '$TARGET_BRANCH' (no unique changes)"
+    exit 0
+fi
+
+# Check if applying the diff from merge-base to source onto target results in no changes
+# This is a bit tricky - we'll check if the tree at source branch is a subset of target
+SOURCE_TREE=$(git rev-parse "$SOURCE_BRANCH^{tree}")
+TARGET_TREE=$(git rev-parse "$TARGET_BRANCH^{tree}")
+
+# Try a different approach: check if the changes from source exist in target
+# by looking for a commit in target that has the same tree or diff
+SOURCE_DIFF=$(git diff "$MERGE_BASE" "$SOURCE_BRANCH" | git patch-id --stable | awk '{print $1}')
+
+# Check if this exact diff appears in any commit reachable from target
+FOUND_SQUASH=false
+while read -r commit; do
+    PARENT=$(git rev-parse "$commit"^1 2>/dev/null || echo "")
+    if [ -n "$PARENT" ]; then
+        COMMIT_PATCH_ID=$(git diff "$PARENT" "$commit" | git patch-id --stable | awk '{print $1}')
+        if [ "$COMMIT_PATCH_ID" = "$SOURCE_DIFF" ]; then
+            echo "✓ Branch '$SOURCE_BRANCH' has been merged into '$TARGET_BRANCH' (squash merge detected via diff matching)"
+            exit 0
+        fi
+    fi
+done < <(git rev-list "$MERGE_BASE".."$TARGET_BRANCH")
+
+# Not merged
+echo "✗ Branch '$SOURCE_BRANCH' has NOT been merged into '$TARGET_BRANCH'"
+COMMIT_COUNT=$(git rev-list --count "$TARGET_BRANCH".."$SOURCE_BRANCH")
+echo "  Commits in '$SOURCE_BRANCH' not in '$TARGET_BRANCH': $COMMIT_COUNT"
+exit 1

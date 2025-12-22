@@ -184,6 +184,64 @@ replace_in_files -j 4 's/foo/bar/g' src/
 - `sed`
 - `xargs`
 
+### find-git-repos
+
+Recursively find all git repositories within specified directories.
+
+**Usage:**
+```bash
+# Find all git repos in a directory
+~/jvscripts/find-git-repos ~/projects
+
+# Search multiple directories
+~/jvscripts/find-git-repos ~/work ~/personal ~/src
+
+# Use in scripts
+for repo in $(~/jvscripts/find-git-repos ~/projects); do
+  echo "Repository: $repo"
+  git -C "$repo" status -s
+done
+```
+
+**Features:**
+- Recursively searches for `.git` directories
+- Outputs repository root paths (not `.git` paths)
+- Supports multiple search paths
+- Fast and simple
+- Useful for batch operations across repositories
+
+### git-is-merged
+
+Check if a git branch has been merged into another branch, detecting regular merges, squash merges, and rebase merges.
+
+**Usage:**
+```bash
+# Check if current branch is merged into default branch
+~/jvscripts/git-is-merged
+
+# Check specific branch against default
+~/jvscripts/git-is-merged feature/my-branch
+
+# Check if one branch is merged into another
+~/jvscripts/git-is-merged feature/my-branch main
+
+# Exit code indicates status (0 = merged, 1 = not merged)
+~/jvscripts/git-is-merged feature/my-branch && echo "Safe to delete!"
+```
+
+**Features:**
+- Detects regular merge commits (fast-forward and merge commits)
+- Detects squash merges (via patch-id matching)
+- Detects rebase merges (via patch-id matching)
+- Auto-detects repository default branch
+- Clear visual output with ✓/✗ indicators
+- Useful for cleaning up old branches
+
+**Detection Methods:**
+1. **Regular merge:** Checks if merge-base equals source commit
+2. **Rebase merge:** Compares patch-ids of all commits
+3. **Squash merge:** Matches cumulative diff against target commits
+
 ---
 
 ## Bash Configuration

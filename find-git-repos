@@ -1,0 +1,6 @@
+#!/bin/sh
+
+for arg
+do
+find "$arg" -type d -name '.git' | sed 's|/.git||'
+done
