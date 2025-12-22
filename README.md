@@ -142,6 +142,48 @@ List all unique `#include` statements from C++ source files in directories.
 - Can filter out STL headers
 - Useful for dependency analysis
 
+### replace_in_files
+
+Parallel sed-style find-and-replace across multiple files using ripgrep for discovery.
+
+**Usage:**
+```bash
+# Modify Python files in place
+replace_in_files -t py 's/foo/bar/g' src/ lib/
+
+# Dry-run: show what would change in Markdown files
+replace_in_files -t md -d 's/old/new/g' docs/
+
+# Multiple file types
+replace_in_files -t py -t js 's/TODO/FIXME/g' .
+
+# Create backup files before modifying
+replace_in_files -b .bak 's/foo/bar/g' ./
+
+# Limit to 4 parallel jobs
+replace_in_files -j 4 's/foo/bar/g' src/
+```
+
+**Options:**
+- `-t, --type TYPE` - Filter by file type (ripgrep types: py, js, rs, md, etc.)
+- `-j, --jobs NUM` - Max parallel jobs (default: nproc)
+- `-b, --backup EXT` - Create backup files with extension (e.g., .bak, .orig)
+- `-d, --dry-run` - Preview changes without modifying files
+- `-h, --help` - Show help message
+
+**Features:**
+- Modifies files in place by default (use `-d` for dry-run)
+- Automatically skips binary files
+- Parallel processing (up to nproc jobs)
+- Ripgrep-based file type filtering
+- Optional backup files before modification
+- Shows diffs in dry-run mode
+
+**Dependencies:**
+- `ripgrep` (rg)
+- `sed`
+- `xargs`
+
 ---
 
 ## Bash Configuration
@@ -176,32 +218,6 @@ echo "source ~/jvscripts/mybashrc.sh" >> ~/.bashrc
 - `histappend` - Append to history
 - `checkwinsize` - Auto-update terminal size
 - Color support for ls, grep, etc.
-
----
-
-## Installation
-
-### Clone Repository
-
-```bash
-git clone <repo-url> ~/jvscripts
-```
-
-### Make Scripts Executable
-
-```bash
-chmod +x ~/jvscripts/{omnimv,plantpreview,list_cpp_includes.sh}
-chmod +x ~/jvscripts/systemd/services/*.sh
-```
-
-### Add to PATH (Optional)
-
-```bash
-echo 'export PATH="$HOME/jvscripts:$PATH"' >> ~/.bashrc
-source ~/.bashrc
-```
-
-Or create individual aliases/symlinks as needed.
 
 ---
 

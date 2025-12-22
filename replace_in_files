@@ -1,0 +1,187 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+# Script to perform sed replacements across multiple files in parallel
+# Uses ripgrep for file discovery (auto-skips binary files) and supports type filtering
+
+usage() {
+    cat <<EOF
+Usage: $(basename "$0") [OPTIONS] <sed_pattern> <directories...>
+
+Perform sed-style replacements across files in specified directories.
+By default modifies files in place.
+
+OPTIONS:
+    -t, --type TYPE     Filter by file type (can be specified multiple times)
+                        Uses ripgrep type names: py, js, rs, md, etc.
+                        Run 'rg --type-list' to see all available types
+    -j, --jobs NUM      Max number of parallel jobs (default: nproc)
+    -b, --backup EXT    Create backup files with specified extension (e.g., .bak, .orig)
+    -d, --dry-run       Show changes without modifying files
+    -h, --help          Show this help message
+
+ARGUMENTS:
+    sed_pattern         Sed-style pattern (e.g., 's/old/new/g')
+    directories         One or more directories to search
+
+EXAMPLES:
+    # Modify Python files in place
+    $(basename "$0") -t py 's/foo/bar/g' src/ lib/
+
+    # Dry-run: show what would change in Markdown files
+    $(basename "$0") -t md -d 's/old/new/g' docs/
+
+    # Multiple file types
+    $(basename "$0") -t py -t js 's/TODO/FIXME/g' .
+
+    # All text files (no type filter)
+    $(basename "$0") 's/2024/2025/g' ./
+
+    # Limit to 4 parallel jobs
+    $(basename "$0") -j 4 's/foo/bar/g' src/
+
+    # Create backup files with .bak extension
+    $(basename "$0") -b .bak 's/foo/bar/g' ./
+
+EOF
+    exit 0
+}
+
+# Parse arguments
+types=()
+dry_run=0
+parallel_jobs=""
+backup_ext=""
+
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        -h|--help)
+            usage
+            ;;
+        -t|--type)
+            if [[ -z "${2:-}" ]]; then
+                echo "Error: -t/--type requires an argument" >&2
+                exit 1
+            fi
+            types+=("$2")
+            shift 2
+            ;;
+        -j|--jobs)
+            if [[ -z "${2:-}" ]]; then
+                echo "Error: -j/--jobs requires an argument" >&2
+                exit 1
+            fi
+            if ! [[ "$2" =~ ^[1-9][0-9]*$ ]]; then
+                echo "Error: -j/--jobs must be a positive integer" >&2
+                exit 1
+            fi
+            parallel_jobs="$2"
+            shift 2
+            ;;
+        -b|--backup)
+            if [[ -z "${2:-}" ]]; then
+                echo "Error: -b/--backup requires an argument" >&2
+                exit 1
+            fi
+            backup_ext="$2"
+            shift 2
+            ;;
+        -d|--dry-run)
+            dry_run=1
+            shift
+            ;;
+        -*)
+            echo "Error: Unknown option: $1" >&2
+            echo "Use -h or --help for usage information" >&2
+            exit 1
+            ;;
+        *)
+            break
+            ;;
+    esac
+done
+
+# Check for required arguments
+if [[ $# -lt 2 ]]; then
+    echo "Error: Missing required arguments" >&2
+    echo "Use -h or --help for usage information" >&2
+    exit 1
+fi
+
+sed_pattern="$1"
+shift
+directories=("$@")
+
+# Validate directories
+for dir in "${directories[@]}"; do
+    if [[ ! -d "$dir" ]]; then
+        echo "Error: Directory not found: $dir" >&2
+        exit 1
+    fi
+done
+
+# Build ripgrep command
+rg_cmd=(rg --files)
+
+# Add type filters if specified
+for type in "${types[@]}"; do
+    rg_cmd+=(-t "$type")
+done
+
+# Add directories
+rg_cmd+=("${directories[@]}")
+
+# Get number of parallel jobs (default to nproc if not set)
+if [[ -z "$parallel_jobs" ]]; then
+    parallel_jobs=$(nproc)
+fi
+
+# Function to process a single file
+process_file() {
+    local file="$1"
+    local pattern="$2"
+    local is_dry_run="$3"
+    local backup_extension="$4"
+
+    if [[ "$is_dry_run" -eq 1 ]]; then
+        # Dry-run: show diff
+        local temp_file
+        temp_file=$(mktemp)
+        if sed "$pattern" "$file" > "$temp_file" 2>/dev/null; then
+            if ! cmp -s "$file" "$temp_file"; then
+                echo "Would modify: $file"
+                diff -u "$file" "$temp_file" | tail -n +3 || true
+            fi
+        else
+            echo "Warning: Failed to process $file" >&2
+        fi
+        rm -f "$temp_file"
+    else
+        # Create backup if requested
+        if [[ -n "$backup_extension" ]]; then
+            cp "$file" "${file}${backup_extension}" 2>/dev/null || {
+                echo "Warning: Failed to create backup for $file" >&2
+                return 1
+            }
+        fi
+
+        # In-place modification
+        sed -i "$pattern" "$file" 2>/dev/null || {
+            echo "Warning: Failed to process $file" >&2
+            return 1
+        }
+
+    fi
+}
+
+export -f process_file
+
+# Show mode
+if [[ "$dry_run" -eq 1 ]]; then
+    echo "Running in DRY-RUN mode - showing changes without modifying files" >&2
+    echo "Remove -d or --dry-run to actually modify files" >&2
+fi
+
+# Find files and process them in parallel
+"${rg_cmd[@]}" | xargs -P "$parallel_jobs" -I {} bash -c "process_file '{}' '$sed_pattern' '$dry_run' '$backup_ext'"
