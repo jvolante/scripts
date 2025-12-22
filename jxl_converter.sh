@@ -76,7 +76,7 @@ fi
 
 # --- Argument Parsing ---
 directories=()
-cjxl_options=()
+cjxl_options=(-q 80 -e 9)
 # Separate directories from cjxl options based on '--'
 while [[ $# -gt 0 ]]; do
     case "$1" in
