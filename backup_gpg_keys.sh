@@ -4,13 +4,11 @@
 
 set -e
 
-echo " GPG Key Backup Script"
-echo "========================="
-echo
-echo "This script will back up your GPG public keys, private (secret) keys,"
-echo "and the owner trust database. The private keys will remain encrypted"
-echo "with their current passphrase."
-echo
+printf " GPG Key Backup Script\n"
+printf "=========================\n\n"
+printf "This script will back up your GPG public keys, private (secret) keys,\n"
+printf "and the owner trust database. The private keys will remain encrypted\n"
+printf "with their current passphrase.\n\n"
 
 # Create a timestamped directory for the backup
 BACKUP_DIR="gpg_backup_$(date --utc +%Y-%m-%d_%H-%M-%S)"
@@ -19,44 +17,39 @@ ARCHIVE_NAME="${BACKUP_DIR}.tar.gz"
 mkdir "$BACKUP_DIR"
 
 # List keys for the user to see
-echo "Found the following GPG public keys:"
+printf "Found the following GPG public keys:\n"
 gpg --list-keys --keyid-format=long
-echo
-echo "Found the following GPG private (secret) keys:"
+printf "\nFound the following GPG private (secret) keys:\n"
 gpg --list-secret-keys --keyid-format=long
-echo
 
-printf "Press Enter to continue with the backup... "
+printf "\nPress Enter to continue with the backup... "
 read -r _
 
 # Export public keys
-echo "Backing up public keys..."
-gpg --export --armor > "${BACKUP_DIR}/public-keys.asc"
-echo "Public keys backed up to ${BACKUP_DIR}/public-keys.asc"
-echo
+printf "Backing up public keys...\n"
+gpg --export --armor > "%s/public-keys.asc" "${BACKUP_DIR}"
+printf "Public keys backed up to %s/public-keys.asc\n\n" "${BACKUP_DIR}"
 
 # Export private keys
-echo "Backing up private keys (these remain encrypted)..."
+printf "Backing up private keys (these remain encrypted)...\n"
 gpg --batch --export-secret-keys --armor > "${BACKUP_DIR}/private-keys.asc"
-echo "Private keys backed up to ${BACKUP_DIR}/private-keys.asc"
-echo
+printf "Private keys backed up to %s/private-keys.asc\n\n" "${BACKUP_DIR}"
 
 # Export ownertrust database
-echo "Backing up owner trust database..."
+printf "Backing up owner trust database...\n"
 gpg --export-ownertrust > "${BACKUP_DIR}/trustdb.txt"
-echo "Owner trust backed up to ${BACKUP_DIR}/trustdb.txt"
-echo
+printf "Owner trust backed up to %s/trustdb.txt\n\n" "${BACKUP_DIR}"
+printf "\n"
 
 # Create a compressed archive
-echo "Creating compressed archive..."
+printf "Creating compressed archive...\n"
 tar -czf "${ARCHIVE_NAME}" "${BACKUP_DIR}"
 
 # Clean up the temporary directory
 rm -r "${BACKUP_DIR}"
 
-echo "===================================================================="
-echo " Backup Complete!"
-echo
-echo "Your GPG keys are backed up in the file: ${ARCHIVE_NAME}"
-echo "Store this file in a safe and secure location (e.g., an encrypted USB drive)."
-echo "===================================================================="
+printf "====================================================================\n"
+printf " Backup Complete!\n\n"
+printf "Your GPG keys are backed up in the file: %s\n" "${ARCHIVE_NAME}"
+printf "Store this file in a safe and secure location (e.g., an encrypted USB drive).\n"
+printf "====================================================================\n"

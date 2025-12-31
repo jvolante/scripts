@@ -1,31 +1,28 @@
 #!/usr/bin/env bash
 
 # Default number of parallel jobs to the number of CPU cores
-DEFAULT_JOBS=$(nproc 2>/dev/null || echo 4)
+DEFAULT_JOBS=$(nproc 2>/dev/null || printf 4)
 MAX_JOBS=${MAX_JOBS:-$DEFAULT_JOBS}
 
 # --- Helper Functions ---
 
 # Function to show usage information
 usage() {
-    echo "Usage: $0 [options] <directory1> [directory2] ... -- [cjxl_options]"
-    echo
-    echo "Recursively finds and converts images to JXL in the specified directories."
-    echo
-    echo "Options:"
-    echo "  -j, --jobs <num>   Number of parallel cjxl jobs to run. Defaults to the number of CPU cores ($DEFAULT_JOBS)."
-    echo "  -h, --help         Show this help message."
-    echo
-    echo "Arguments:"
-    echo "  <directory1>...    One or more directories to search for images."
-    echo "  [cjxl_options]     All arguments after '--' are passed directly to the cjxl command."
-    echo
-    echo "Behavior:"
-    echo "  - Finds images (.jpg, .jpeg, .png, .gif, .apng, .webp, .bmp, .tiff, .tif, .ppm, .pfm, .pgx)."
-    echo "  - If a .jxl file with the same name already exists, the original is deleted."
-    echo "  - If conversion is successful, the original file is deleted."
-    echo "  - If conversion fails, the original is kept and any partial .jxl file is removed."
-    echo "  - A list of failed conversions is printed at the end."
+    printf "Usage: %s [options] <directory1> [directory2] ... -- [cjxl_options]\n\n" "$0"
+    printf "Recursively finds and converts images to JXL in the specified directories.\n\n"
+    printf "Options:\n"
+    printf "  -j, --jobs <num>   Number of parallel cjxl jobs to run. Defaults to the number of CPU cores (%s).\n" "$DEFAULT_JOBS"
+    printf "  -h, --help         Show this help message.\n\n"
+    printf "Arguments:\n"
+    printf "  <directory1>...    One or more directories to search for images.\n"
+    printf "  [cjxl_options]     All arguments after '--' are passed directly to the cjxl command.\n"
+    printf "\n"
+    printf "Behavior:\n"
+    printf "  - Finds images (.jpg, .jpeg, .png, .gif, .apng, .webp, .bmp, .tiff, .tif, .ppm, .pfm, .pgx).\n"
+    printf "  - If a .jxl file with the same name already exists, the original is deleted.\n"
+    printf "  - If conversion is successful, the original file is deleted.\n"
+    printf "  - If conversion fails, the original is kept and any partial .jxl file is removed.\n"
+    printf "  - A list of failed conversions is printed at the end.\n"
 }
 
 # Function to handle the conversion of a single file
@@ -40,26 +37,26 @@ convert_one() {
 
     # Check if JXL file already exists
     if [[ -f "$jxl_file" ]]; then
-        echo "[EXISTS] JXL found for '$image_file'. Deleting original."
+        printf "[EXISTS] JXL found for '%s'. Deleting original.\n" "$image_file"
         if ! rm "$image_file"; then
-            echo "[ERROR] Failed to delete original file '$image_file'."
-            echo "$image_file (failed to delete original)" >> "$failure_log"
+            printf "[ERROR] Failed to delete original file '%s'.\n" "$image_file"
+            printf "%s (failed to delete original)\n" "$image_file" >> "$failure_log"
         fi
         return
     fi
 
-    echo "[CONVERTING] '$image_file' -> '$jxl_file'"
+    printf "[CONVERTING] '%s' -> '%s'\n" "$image_file" "$jxl_file"
 
     # Attempt conversion
     if cjxl "$image_file" "$jxl_file" "${cjxl_args[@]}" 2> /dev/null; then
-        echo "[SUCCESS] Converted '$image_file'. Deleting original."
+        printf "[SUCCESS] Converted '%s'. Deleting original.\n" "$image_file"
         if ! rm "$image_file"; then
-            echo "[ERROR] Failed to delete original file '$image_file' after successful conversion."
-            echo "$image_file (failed to delete original after conversion)" >> "$failure_log"
+            printf "[ERROR] Failed to delete original file '%s' after successful conversion.\n" "$image_file"
+            printf "%s (failed to delete original after conversion)\n" "$image_file" >> "$failure_log"
         fi
     else
-        echo "[FAILED] Conversion failed for '$image_file'."
-        echo "$image_file" >> "$failure_log"
+        printf "[FAILED] Conversion failed for '%s'.\n" "$image_file"
+        printf "%s\n" "$image_file" >> "$failure_log"
         # Clean up the failed/partial JXL file
         rm -f "$jxl_file"
     fi
@@ -69,8 +66,8 @@ convert_one() {
 
 # Check for cjxl dependency
 if ! command -v cjxl &> /dev/null; then
-    echo "Error: 'cjxl' command not found."
-    echo "Please install jpeg-xl from https://github.com/libjxl/libjxl"
+    printf "Error: 'cjxl' command not found.\n"
+    printf "Please install jpeg-xl from https://github.com/libjxl/libjxl\n"
     exit 1
 fi
 
@@ -85,7 +82,7 @@ while [[ $# -gt 0 ]]; do
                 MAX_JOBS="$2"
                 shift 2
             else
-                echo "Error: --jobs requires a numeric argument." >&2
+                printf "Error: --jobs requires a numeric argument.\n" >&2
                 exit 1
             fi
             ;; 
@@ -99,7 +96,7 @@ while [[ $# -gt 0 ]]; do
             break
             ;; 
         -*)
-            echo "Unknown option: $1"
+            printf "Unknown option: %s\n" "$1"
             usage
             exit 1
             ;; 
@@ -111,7 +108,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 if [[ ${#directories[@]} -eq 0 ]]; then
-    echo "Error: No directories specified."
+    printf "Error: No directories specified.\n"
     usage
     exit 1
 fi
@@ -119,7 +116,7 @@ fi
 # Validate directories
 for dir in "${directories[@]}"; do
     if [[ ! -d "$dir" ]]; then
-        echo "Error: Directory '$dir' not found."
+        printf "Error: Directory '%s' not found.\n" "$dir"
         exit 1
     fi
 done
@@ -137,11 +134,11 @@ export failure_log
 
 # Find all relevant image files and process them
 # The -print0 and read -d '' handles filenames with spaces or special characters.
-echo "Starting conversion with up to $MAX_JOBS parallel jobs..."
+printf "Starting conversion with up to %s parallel jobs...\n" "$MAX_JOBS"
 if [[ ${#cjxl_options[@]} -gt 0 ]]; then
-    echo "Passing additional arguments to cjxl: ${cjxl_options[*]}"
+    printf "Passing additional arguments to cjxl: %s\n" "${cjxl_options[*]}"
 fi
-echo "---------------------------------"
+printf "---------------------------------\n"
 
 find "${directories[@]}" -type f \( \
     -iname "*.jpg" -o -iname "*.jpeg" -o -iname "*.png" -o \
@@ -164,18 +161,16 @@ sleep .1
 
 # --- Report Failures ---
 if [[ -s "$failure_log" ]]; then
-    echo
-    echo "---------------------------------"
-    echo "The following conversions failed:"
-    echo "---------------------------------"
+    printf "\n---------------------------------\n"
+    printf "The following conversions failed:\n"
+    printf "---------------------------------\n"
     sort -u "$failure_log"
-    echo "---------------------------------"
+    printf "---------------------------------\n"
     # The trap will handle cleanup of the failure_log
     exit 1
 else
-    echo
-    echo "---------------------------------"
-    echo "All conversions completed successfully."
-    echo "---------------------------------"
+    printf "\n---------------------------------\n"
+    printf "All conversions completed successfully.\n"
+    printf "---------------------------------\n"
     exit 0
 fi

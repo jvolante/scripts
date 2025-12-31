@@ -185,12 +185,12 @@ EOF
             exit 0
             ;;
         --version)
-            echo "omnimv 1.0 - Intelligent git-aware move command"
+            printf "omnimv 1.0 - Intelligent git-aware move command\n"
             exit 0
             ;;
         -*)
-            echo "omnimv: unrecognized option '$1'" >&2
-            echo "Try 'omnimv --help' for more information." >&2
+            printf "omnimv: unrecognized option '%s'\n" "$1" >&2
+            printf "Try 'omnimv --help' for more information.\n" >&2
             exit 1
             ;;
         *)
@@ -202,15 +202,15 @@ done
 
 # Validate arguments
 if [[ ${#sources[@]} -eq 0 ]]; then
-    echo "omnimv: missing file operand" >&2
-    echo "Try 'omnimv --help' for more information." >&2
+    printf "omnimv: missing file operand\n" >&2
+    printf "Try 'omnimv --help' for more information.\n" >&2
     exit 1
 fi
 
 if [[ $use_target_dir -eq 0 ]]; then
     if [[ ${#sources[@]} -lt 2 ]]; then
-        echo "omnimv: missing destination file operand after '${sources[0]}'" >&2
-        echo "Try 'omnimv --help' for more information." >&2
+        printf "omnimv: missing destination file operand after '%s'\n" "${sources[0]}" >&2
+        printf "Try 'omnimv --help' for more information.\n" >&2
         exit 1
     fi
     # Last argument is destination
@@ -256,14 +256,14 @@ if in_git_repo; then
             if is_tracked "$source" 2>/dev/null; then
                 # Use git mv for tracked files
                 if [[ $dry_run -eq 1 ]]; then
-                    echo "Would git mv: $source -> $destination"
+                    printf "Would git mv: %s -> %s\n" "$source" "$destination"
                 else
                     git mv "${git_mv_args[@]}" "$source" "$destination"
                 fi
             else
                 # Use regular mv for untracked files
                 if [[ $dry_run -eq 1 ]]; then
-                    echo "Would mv: $source -> $destination"
+                    printf "Would mv: %s -> %s\n" "$source" "$destination"
                 else
                     mv "${mv_args[@]}" "$source" "$destination"
                 fi
@@ -278,12 +278,12 @@ if in_git_repo; then
         if [[ $interactive -eq 1 || $update -eq 1 || -n $backup || $no_target_directory -eq 1 ]]; then
             # These options require regular mv
             if [[ $verbose -eq 1 ]]; then
-                echo "omnimv: using 'mv' due to mv-specific options" >&2
+                printf "omnimv: using 'mv' due to mv-specific options\n" >&2
             fi
             if [[ $dry_run -eq 1 ]]; then
-                echo "Would execute: mv ${mv_args[*]} ${sources[*]} $destination"
+                printf "Would execute: mv %s %s %s\n" "${mv_args[*]}" "${sources[*]}" "$destination"
                 # Also need to manually stage
-                echo "Would execute: git add -A"
+                printf "Would execute: git add -A\n"
             else
                 mv "${mv_args[@]}" "${sources[@]}" "$destination"
                 # Stage the changes in git
@@ -309,15 +309,15 @@ if [[ $skip_errors -eq 1 ]]; then
     for source in "${sources[@]}"; do
         if [[ $dry_run -eq 1 ]]; then
             if [[ -e "$source" ]]; then
-                echo "Would mv: $source -> $destination"
+                printf "Would mv: %s -> %s\n" "$source" "$destination"
             else
-                echo "Would skip (not found): $source" >&2
+                printf "Would skip (not found): %s\n" "$source" >&2
                 exit_code=1
             fi
         else
             if ! mv "${mv_args[@]}" "$source" "$destination" 2>/dev/null; then
                 if [[ $verbose -eq 1 ]]; then
-                    echo "Skipped (error): $source" >&2
+                    printf "Skipped (error): %s\n" "$source" >&2
                 fi
                 exit_code=1
             fi
@@ -327,7 +327,7 @@ if [[ $skip_errors -eq 1 ]]; then
 elif [[ $dry_run -eq 1 ]]; then
     # Emulate dry-run
     for source in "${sources[@]}"; do
-        echo "Would mv: $source -> $destination"
+        printf "Would mv: %s -> %s\n" "$source" "$destination"
     done
 else
     # Standard mv

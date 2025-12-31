@@ -4,9 +4,8 @@
 
 set -e
 
-echo " GPG Key Restore Script"
-echo "=========================="
-echo
+printf " GPG Key Restore Script\n"
+printf "==========================\n\n"
 
 # --- Argument Parsing ---
 dry_run=false
@@ -14,9 +13,8 @@ BACKUP_ARCHIVE=""
 
 if [ "$1" = "--dry-run" ]; then
   dry_run=true
-  echo "--- Dry Run Mode Activated ---"
-  echo "The script will display keys from the archive without importing them."
-  echo
+  printf "=== Dry Run Mode Activated ===\n"
+  printf "The script will display keys from the archive without importing them.\n\n"
   BACKUP_ARCHIVE="$2"
 else
   BACKUP_ARCHIVE="$1"
@@ -39,14 +37,14 @@ fi
 
 
 if [ ! -f "$BACKUP_ARCHIVE" ]; then
-  echo "Error: Backup file not found at '${BACKUP_ARCHIVE}'"
+  printf "Error: Backup file not found at '%s'\n" "$BACKUP_ARCHIVE"
   exit 1
 fi
 
 # Create a temporary directory for extraction. mktemp is not in POSIX, but is
 # the only secure way. We avoid non-portable flags like -t.
 RESTORE_DIR=$(mktemp -d "${TMPDIR:-/tmp}/gpg-restore.XXXXXX")
-echo "Extracting backup archive to temporary directory: ${RESTORE_DIR}"
+printf "Extracting backup archive to temporary directory: %s\n" "$RESTORE_DIR"
 
 # To avoid non-POSIX tar flags, use a subshell to change directory for extraction.
 # We also ensure we have an absolute path to the archive.
@@ -66,41 +64,33 @@ PRIVATE_KEYS_FILE="${RESTORE_DIR}/${SUBDIR}/private-keys.asc"
 TRUSTDB_FILE="${RESTORE_DIR}/${SUBDIR}/trustdb.txt"
 
 if [ ! -f "$PUBLIC_KEYS_FILE" ] || [ ! -f "$PRIVATE_KEYS_FILE" ] || [ ! -f "$TRUSTDB_FILE" ]; then
-    echo "Error: One or more required files not found in the archive."
+    printf "Error: One or more required files not found in the archive.\n"
     rm -r "$RESTORE_DIR"
     exit 1
 fi
 
 if [ "$dry_run" = true ]; then
-  echo
-  echo "--- Dry Run Results ---"
-  echo "The following PUBLIC keys would be imported:"
+  printf "\n=== Dry Run Results ===\n"
+  printf "The following PUBLIC keys would be imported:\n"
   gpg --show-keys "${PUBLIC_KEYS_FILE}"
-  echo
-  echo "The following PRIVATE keys would be imported:"
+  printf "\nThe following PRIVATE keys would be imported:\n"
   gpg --show-keys "${PRIVATE_KEYS_FILE}"
-  echo
-  echo "The owner trust database would also be imported."
-  echo "--- End of Dry Run ---"
+  printf "\nThe owner trust database would also be imported.\n"
+  printf "=== End of Dry Run ===\n"
 else
-  echo
-  printf "Backup extracted. Press Enter to begin importing the keys... "
+  printf "\nBackup extracted. Press Enter to begin importing the keys... "
   read -r _
-  echo
 
   # Import keys and trust database
-  echo "Importing public keys..."
+  printf "\nImporting public keys...\n"
   gpg --import "${PUBLIC_KEYS_FILE}"
-  echo
 
-  echo "Importing private keys..."
-  echo "You may be prompted to enter the passphrase for each key."
+  printf "\nImporting private keys...\n"
+  printf "You may be prompted to enter the passphrase for each key.\n"
   gpg --import "${PRIVATE_KEYS_FILE}"
-  echo
 
-  echo "Importing owner trust database..."
+  printf "\nImporting owner trust database...\n"
   gpg --import-ownertrust "${TRUSTDB_FILE}"
-  echo
 fi
 
 
@@ -108,11 +98,11 @@ fi
 rm -r "$RESTORE_DIR"
 
 if [ "$dry_run" = false ]; then
-  echo "===================================================================="
-  echo " Restore Complete!"
-  echo
-  echo "You can verify the imported keys by running:"
-  echo "  gpg --list-keys"
-  echo "  gpg --list-secret-keys"
-  echo "===================================================================="
+  printf "\n====================================================================\n"
+  printf " Restore Complete!\n"
+  printf "\n"
+  printf "You can verify the imported keys by running:\n"
+  printf "  gpg --list-keys\n"
+  printf "  gpg --list-secret-keys\n"
+  printf "====================================================================\n"
 fi

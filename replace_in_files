@@ -61,7 +61,7 @@ while [[ $# -gt 0 ]]; do
             ;;
         -t|--type)
             if [[ -z "${2:-}" ]]; then
-                echo "Error: -t/--type requires an argument" >&2
+                printf "Error: -t/--type requires an argument\n" >&2
                 exit 1
             fi
             types+=("$2")
@@ -69,11 +69,11 @@ while [[ $# -gt 0 ]]; do
             ;;
         -j|--jobs)
             if [[ -z "${2:-}" ]]; then
-                echo "Error: -j/--jobs requires an argument" >&2
+                printf "Error: -j/--jobs requires an argument\n" >&2
                 exit 1
             fi
             if ! [[ "$2" =~ ^[1-9][0-9]*$ ]]; then
-                echo "Error: -j/--jobs must be a positive integer" >&2
+                printf "Error: -j/--jobs must be a positive integer\n" >&2
                 exit 1
             fi
             parallel_jobs="$2"
@@ -81,7 +81,7 @@ while [[ $# -gt 0 ]]; do
             ;;
         -b|--backup)
             if [[ -z "${2:-}" ]]; then
-                echo "Error: -b/--backup requires an argument" >&2
+                printf "Error: -b/--backup requires an argument\n" >&2
                 exit 1
             fi
             backup_ext="$2"
@@ -92,8 +92,8 @@ while [[ $# -gt 0 ]]; do
             shift
             ;;
         -*)
-            echo "Error: Unknown option: $1" >&2
-            echo "Use -h or --help for usage information" >&2
+            printf "Error: Unknown option: %s\n" "$1" >&2
+            printf "Use -h or --help for usage information\n" >&2
             exit 1
             ;;
         *)
@@ -104,8 +104,8 @@ done
 
 # Check for required arguments
 if [[ $# -lt 2 ]]; then
-    echo "Error: Missing required arguments" >&2
-    echo "Use -h or --help for usage information" >&2
+    printf "Error: Missing required arguments\n" >&2
+    printf "Use -h or --help for usage information\n" >&2
     exit 1
 fi
 
@@ -116,7 +116,7 @@ directories=("$@")
 # Validate directories
 for dir in "${directories[@]}"; do
     if [[ ! -d "$dir" ]]; then
-        echo "Error: Directory not found: $dir" >&2
+        printf "Error: Directory not found: %s\n" "$dir" >&2
         exit 1
     fi
 done
@@ -150,25 +150,25 @@ process_file() {
         temp_file=$(mktemp)
         if sed "$pattern" "$file" > "$temp_file" 2>/dev/null; then
             if ! cmp -s "$file" "$temp_file"; then
-                echo "Would modify: $file"
+                printf "Would modify: %s\n" "$file"
                 diff -u "$file" "$temp_file" | tail -n +3 || true
             fi
         else
-            echo "Warning: Failed to process $file" >&2
+            printf "Warning: Failed to process %s\n" "$file" >&2
         fi
         rm -f "$temp_file"
     else
         # Create backup if requested
         if [[ -n "$backup_extension" ]]; then
             cp "$file" "${file}${backup_extension}" 2>/dev/null || {
-                echo "Warning: Failed to create backup for $file" >&2
+                printf "Warning: Failed to create backup for %s\n" "$file" >&2
                 return 1
             }
         fi
 
         # In-place modification
         sed -i "$pattern" "$file" 2>/dev/null || {
-            echo "Warning: Failed to process $file" >&2
+            printf "Warning: Failed to process %s\n" "$file" >&2
             return 1
         }
 
@@ -179,8 +179,8 @@ export -f process_file
 
 # Show mode
 if [[ "$dry_run" -eq 1 ]]; then
-    echo "Running in DRY-RUN mode - showing changes without modifying files" >&2
-    echo "Remove -d or --dry-run to actually modify files" >&2
+    printf "Running in DRY-RUN mode - showing changes without modifying files\n" >&2
+    printf "Remove -d or --dry-run to actually modify files\n" >&2
 fi
 
 # Find files and process them in parallel

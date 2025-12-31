@@ -4,13 +4,13 @@
 set -u
 
 if [[ $# -eq 0 ]] || [[ $# -gt 3 ]]; then
-  echo "Usage: $(basename "$0") <user@host:path> [remote-name] [repo-dir]"
+  printf "Usage: %s <user@host:path> [remote-name] [repo-dir]\n" "$(basename "$0")"
   exit 1
 fi
 
 REMOTE_URL=$1
 if [[ "$REMOTE_URL" != *":"* ]]; then
-    echo "Error: Remote URL must be in the format user@host:path"
+    printf "Error: Remote URL must be in the format user@host:path\n"
     exit 1
 fi
 REMOTE_NAME=${2:-origin}
@@ -23,7 +23,7 @@ gitc () {
 
 gitc remote | grep "\<$REMOTE_NAME\>" > /dev/null
 if [[ $? -eq 0 ]]; then
-  echo "Remote $REMOTE_NAME already exists"
+  printf "Remote %s already exists\n" "$REMOTE_NAME"
   exit 1
 fi
 
@@ -32,17 +32,17 @@ GIT_ROOT=$(gitc rev-parse --show-toplevel)
 if [[ $? -eq 128 ]]; then
   set -e
 
-  echo "$REPO_DIR was not a git repository, initializing..."
+  printf "%s was not a git repository, initializing...\n" "$REPO_DIR"
   gitc init
   GIT_ROOT=$(gitc rev-parse --show-toplevel)
-  echo "Successfully initialized repository at $REPO_DIR"
+  printf "Successfully initialized repository at %s\n" "$REPO_DIR"
 fi
 
 set -e
 
 REPO_NAME="$(basename "$GIT_ROOT")".git
 REMOTE_URL="$REMOTE_URL/$REPO_NAME"
-echo "Creating bare repo at: $REMOTE_URL"
+printf "Creating bare repo at: %s\n" "$REMOTE_URL"
 REMOTE_PATH=${REMOTE_URL##*:}
 REMOTE_CMD=$(printf 'set -e; mkdir -p %q && git -C %q init --bare' "$REMOTE_PATH" "$REMOTE_PATH")
 ssh "${REMOTE_URL%:*}" "$REMOTE_CMD"

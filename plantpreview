@@ -12,14 +12,14 @@ trap 'rm -rf "$TEMP_DIR"' EXIT
 # Check for required tools
 for tool in inotifywait plantuml timg; do
     if ! command -v "$tool" &> /dev/null; then
-        echo "Error: $tool is not installed" >&2
+        printf "Error: %s is not installed\n" "$tool" >&2
         exit 1
     fi
 done
 
-echo "Watching for .puml files in: $WATCH_DIR"
-echo "Press Ctrl+C to stop"
-echo ""
+printf "Watching for .puml files in: %s\n" "$WATCH_DIR"
+printf "Press Ctrl+C to stop\n"
+printf "\n"
 
 # Function to render and display a PlantUML file
 render_and_display() {
@@ -27,19 +27,19 @@ render_and_display() {
     local basename=$(basename "$puml_file" .puml)
     local output_png="$TEMP_DIR/${basename}.png"
 
-    echo "[$(date '+%H:%M:%S')] Processing: $puml_file"
+    printf "[%s] Processing: %s\n" "$(date '+%H:%M:%S')" "$puml_file"
 
     # Render PlantUML to PNG
     if plantuml -tpng -o "$TEMP_DIR" "$puml_file" 2>&1; then
         # Display with timg
         if [ -f "$output_png" ]; then
             timg "$output_png"
-            echo ""
+            printf "\n"
         else
-            echo "Error: Failed to generate $output_png" >&2
+            printf "Error: Failed to generate %s\n" "$output_png" >&2
         fi
     else
-        echo "Error: Failed to render $puml_file" >&2
+        printf "Error: Failed to render %s\n" "$puml_file" >&2
     fi
 }
 

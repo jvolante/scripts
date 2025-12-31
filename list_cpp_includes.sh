@@ -67,7 +67,7 @@ filter_stl_headers() {
         base_include=$(basename "$include")
 
         IS_STL=0
-        if echo "$STL_HEADERS_CACHE" | grep -qFx "$base_include"; then
+        if printf "%s\n" "$STL_HEADERS_CACHE" | grep -qFx "$base_include"; then
             IS_STL=1
         fi
 
@@ -80,7 +80,7 @@ filter_stl_headers() {
         fi
     done <<< "$includes"
 
-    echo "$filtered"
+    printf '%s\n' "${stl_headers[@]}" | sort -u
 }
 
 # Parse options
@@ -105,25 +105,22 @@ while [[ $# -gt 0 ]]; do
             shift
             ;;
         -h|--help)
-            echo "Usage: $0 [-g|--global] [-l|--local] [--no-stl] [-H|--headers-only] <directory1> [directory2] [directory3] ..."
-            echo ""
-            echo "Lists unique #include paths for all C++ source and header files in the specified directories"
-            echo ""
-            echo "By default, includes are categorized into:"
-            echo "  - Headers (propagated dependencies): All includes found in header files"
-            echo "  - Sources only (implementation details): Includes found only in source files"
-            echo ""
-            echo "Options:"
-            echo "  -g, --global        Show only global includes (angle brackets: <header.h>)"
-            echo "  -l, --local         Show only local includes (quotes: \"header.h\")"
-            echo "  --no-stl            Filter out C++ standard library headers"
-            echo "  -H, --headers-only  Only show header file includes (disables categorization)"
-            echo "  -h, --help          Show this help message"
+            printf "Usage: %s [-g|--global] [-l|--local] [--no-stl] [-H|--headers-only] <directory1> [directory2] [directory3] ...\n\n" "$0"
+            printf "Lists unique #include paths for all C++ source and header files in the specified directories\n\n"
+            printf "By default, includes are categorized into:\n"
+            printf "  - Headers (propagated dependencies): All includes found in header files\n"
+            printf "  - Sources only (implementation details): Includes found only in source files\n"
+            printf "\nOptions:\n"
+            printf "  -g, --global        Show only global includes (angle brackets: <header.h>)\n"
+            printf "  -l, --local         Show only local includes (quotes: \"header.h\")\n"
+            printf "  --no-stl            Filter out C++ standard library headers\n"
+            printf "  -H, --headers-only  Only show header file includes (disables categorization)\n"
+            printf "  -h, --help          Show this help message\n"
             exit 0
             ;;
         -*)
-            echo "Error: Unknown option '$1'"
-            echo "Use -h or --help for usage information"
+            printf "Error: Unknown option '%s'\n" "$1"
+            printf "Use -h or --help for usage information\n"
             exit 1
             ;;
         *)
@@ -133,8 +130,8 @@ while [[ $# -gt 0 ]]; do
 done
 
 if [ $# -eq 0 ]; then
-    echo "Usage: $0 [-g|--global] [-l|--local] [--no-stl] [-H|--headers-only] <directory1> [directory2] [directory3] ..."
-    echo "Use -h or --help for more information"
+    printf "Usage: %s [-g|--global] [-l|--local] [--no-stl] [-H|--headers-only] <directory1> [directory2] [directory3] ...\n" "$0"
+    printf "Use -h or --help for more information\n"
     exit 1
 fi
 
@@ -145,12 +142,12 @@ fi
 
 for dir in "$@"; do
     if [ ! -d "$dir" ]; then
-        echo "Error: Directory '$dir' does not exist"
+        printf "Error: Directory '%s' does not exist\n" "$dir"
         continue
     fi
 
     # Print directory name in bold (using ANSI escape codes)
-    echo -e "\033[1m${dir}\033[0m"
+    printf "\033[1m%s\033[0m\n" "$dir"
 
     if [ $HEADERS_ONLY -eq 1 ]; then
         # Original behavior: just show header includes
@@ -184,12 +181,12 @@ for dir in "$@"; do
                 SORTED_RESULTS=$(filter_stl_headers "$SORTED_RESULTS")
             fi
             if [ -n "$SORTED_RESULTS" ]; then
-                echo "$SORTED_RESULTS"
+                printf "%s\n" "$SORTED_RESULTS"
             else
-                echo "  (no includes found)"
+                printf "  (no includes found)\n"
             fi
         else
-            echo "  (no includes found)"
+            printf "  (no includes found)\n"
         fi
     else
         # New behavior: categorize by file type
@@ -221,7 +218,7 @@ for dir in "$@"; do
                 HEADER_INCLUDES="$HEADER_LOCAL"
             fi
         fi
-        HEADER_INCLUDES=$(echo "$HEADER_INCLUDES" | sort -u)
+        HEADER_INCLUDES=$(printf "%s\n" "$HEADER_INCLUDES" | sort -u)
 
         # Get includes from sources
         SOURCE_INCLUDES=""
@@ -243,7 +240,7 @@ for dir in "$@"; do
                 SOURCE_INCLUDES="$SOURCE_LOCAL"
             fi
         fi
-        SOURCE_INCLUDES=$(echo "$SOURCE_INCLUDES" | sort -u)
+        SOURCE_INCLUDES=$(printf "%s\n" "$SOURCE_INCLUDES" | sort -u)
 
         # Categorize includes
         IN_HEADERS=""
@@ -255,7 +252,7 @@ for dir in "$@"; do
         # Find includes only in sources (implementation-only dependencies)
         if [ -n "$SOURCE_INCLUDES" ]; then
             if [ -n "$HEADER_INCLUDES" ]; then
-                ONLY_IN_SOURCES=$(comm -13 <(echo "$HEADER_INCLUDES") <(echo "$SOURCE_INCLUDES"))
+                ONLY_IN_SOURCES=$(comm -13 <(printf "%s\n" "$HEADER_INCLUDES") <(printf "%s\n" "$SOURCE_INCLUDES"))
             else
                 ONLY_IN_SOURCES="$SOURCE_INCLUDES"
             fi
@@ -273,20 +270,20 @@ for dir in "$@"; do
 
         # Display results
         if [ -n "$IN_HEADERS" ]; then
-            echo "  Headers (propagated dependencies):"
-            echo "$IN_HEADERS" | sed 's/^/    /'
+            printf "  Headers (propagated dependencies):\n"
+            printf "%s\n" "$IN_HEADERS" | sed 's/^/    /'
         fi
 
         if [ -n "$ONLY_IN_SOURCES" ]; then
-            echo "  Sources only (implementation details):"
-            echo "$ONLY_IN_SOURCES" | sed 's/^/    /'
+            printf "  Sources only (implementation details):\n"
+            printf "%s\n" "$ONLY_IN_SOURCES" | sed 's/^/    /'
         fi
 
         if [ -z "$IN_HEADERS" ] && [ -z "$ONLY_IN_SOURCES" ]; then
-            echo "  (no includes found)"
+            printf "  (no includes found)\n"
         fi
     fi
 
     # Blank line between directories
-    echo
+    printf "\n"
 done

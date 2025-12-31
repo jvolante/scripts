@@ -2,13 +2,13 @@
 set -e
 
 remotes=$(git remote -v | grep \(push\)\$)
-origin_remote=$(echo "$remotes" | grep origin)
+origin_remote=$(printf "%s\n" "$remotes" | grep origin)
 
 if [[ ${#origin_remote} -ne 0 ]]; then
     remote=origin_remote
 else
-    remote=$(echo "$remotes" | head -1)
+    remote=$(printf "%s\n" "$remotes" | head -1)
 fi
 
-url=$(echo "$remote" | sed 's|[A-z0-9]\+  [A-z]\+@\([A-z0-9_-]\+\.[A-z0-9]\+\):\([A-z/_-]\+\)\.\w\+ .*$|\1/\2|g')
-echo "$url"
+url=$(printf "%s\n" "$remote" | sed 's|[A-z0-9]\+  [A-z]\+@\([A-z0-9_-]\+\.[A-z0-9]\+\):\([A-z/_-]\+\)\.\w\+ .*$|\1/\2|g')
+printf "%s\n" "$url"

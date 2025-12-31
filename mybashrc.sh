@@ -46,69 +46,6 @@ if [ -x /usr/bin/dircolors ]; then
     alias egrep='egrep --color=auto'
 fi
 
-# Function to replace pattern in text files
-# Usage: replace_in_files <pattern> <replacement> <file_or_directory> [<file_or_directory2> ...]
-#
-# This function safely replaces all occurrences of a pattern with a replacement
-# in text files only. It can operate on multiple files or directories at once,
-# automatically detecting and skipping binary/non-text files.
-replace_in_files() {
-    local pattern="$1"      # The pattern (regex) to search for
-    local replacement="$2"  # The text to replace the pattern with
-
-    # Check if required arguments are provided
-    if [ -z "$pattern" ] || [ -z "$replacement" ] || [ -z "$3" ]; then
-        echo "Usage: replace_in_files <pattern> <replacement> <file_or_directory> [<file_or_directory2> ...]"
-        return 1
-    fi
-
-    # Shift the first two arguments, leaving file/directory paths
-    shift 2
-
-    # Loop through each target file/directory
-    for target in "$@"; do
-        # Verify the target exists
-        if [ ! -e "$target" ]; then
-            echo "Error: '$target' does not exist"
-            continue
-        fi
-
-        # Function to process a single file
-        process_file() {
-            local file="$1"
-            # Check if the file is a text file using the 'file' command
-            # This detects if file is binary or text based on content, not extension
-            if file --mime-type "$file" | grep -q "text/"; then
-                # -i flag makes sed edit the file in-place
-                sed -i "s|$pattern|$replacement|g" "$file"
-                if [ $? -ne 0 ]; then
-                    echo "Error: sed command failed for $file"
-                fi
-            fi
-        }
-
-        if [ -f "$target" ]; then
-            # For a single file
-            process_file "$target"
-        elif [ -d "$target" ]; then
-            # For a directory - find all regular files and process them if they're text files
-            # This complex pipeline safely handles filenames with spaces, newlines, and special characters
-            # find "$target" -type f -print0: Outputs filenames terminated by null bytes instead of newlines
-            # while IFS= read -r -d '' file:
-            #   IFS=        : Prevents leading/trailing whitespace from being trimmed
-            #   read -r     : Preserves backslashes in filenames, doesn't treat them as escape characters
-            #   -d ''       : Sets the delimiter to the null character (what find -print0 outputs)
-            #   file        : Variable to store each filename
-            find "$target" -type f -print0 | while IFS= read -r -d '' file; do
-                process_file "$file"
-            done
-        else
-            echo "Error: '$target' is neither a regular file nor a directory"
-            return 1
-        fi
-    done
-}
-
 # Function to parse a flake file and print entries in the format:
 # "Original flake URL#Flake attribute"
 list_profile_install_targets() {
