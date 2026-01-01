@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+
+set -e
+
+system=$(nix eval --raw --impure --expr builtins.currentSystem)
+nix flake show --json 2> /dev/null | jq -r ".packages.\"$system\" | keys[]" | sed 's|^|.#|g' | xargs nix build --no-link
+
+printf "Build complete.\n"
