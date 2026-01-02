@@ -86,3 +86,6 @@ list_profile_install_targets() {
   ' "$input"
 }
 
+mkcd() {
+  mkdir -p "$1" && cd "$1"
+}
