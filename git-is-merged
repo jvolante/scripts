@@ -24,7 +24,7 @@ if [ -n "${2:-}" ]; then
     TARGET_BRANCH="$2"
 else
     # Try to get the default branch from remote
-    TARGET_BRANCH=$(git symbolic-ref refs/remotes/origin/HEAD 2>/dev/null | sed 's@^refs/remotes/origin/@@' || echo "master")
+    TARGET_BRANCH=$(git symbolic-ref refs/remotes/origin/HEAD 2>/dev/null | sed 's@^refs/remotes/origin/@@' || echo "origin/master")
 fi
 
 printf "Checking if branch '%s' has been merged into '%s'...\n" "$SOURCE_BRANCH" "$TARGET_BRANCH"
