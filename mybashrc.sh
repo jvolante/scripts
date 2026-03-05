@@ -32,18 +32,19 @@ alias alert='notify-send --urgency=low -i "$([ $? = 0 ] && echo terminal || echo
 alias make="make -j"
 alias bush="rg --files | tree --fromfile"
 alias mv="omnimv"
+alias av='source .venv/bin/activate || source venv/bin/activate'
 alias e="$EDITOR"
 
 # enable color support of ls and also add handy aliases
 if [ -x /usr/bin/dircolors ]; then
-    test -r ~/.dircolors && eval "$(dircolors -b ~/.dircolors)" || eval "$(dircolors -b)"
-    alias ls='ls --color=auto'
-    #alias dir='dir --color=auto'
-    #alias vdir='vdir --color=auto'
+  test -r ~/.dircolors && eval "$(dircolors -b ~/.dircolors)" || eval "$(dircolors -b)"
+  alias ls='ls --color=auto'
+  #alias dir='dir --color=auto'
+  #alias vdir='vdir --color=auto'
 
-    alias grep='grep --color=auto'
-    alias fgrep='fgrep --color=auto'
-    alias egrep='egrep --color=auto'
+  alias grep='grep --color=auto'
+  alias fgrep='fgrep --color=auto'
+  alias egrep='egrep --color=auto'
 fi
 
 # Function to parse a flake file and print entries in the format:
@@ -88,4 +89,66 @@ list_profile_install_targets() {
 
 mkcd() {
   mkdir -p "$1" && cd "$1"
+}
+
+ncmp_cpp() {
+  nix develop --command bash -c "cmake -Bbuild . && make -Cbuild -j" && nix develop
+}
+
+codecs() {
+  ffmpeg -encoders 2>&1 | grep -E "(h264|h265|vp8|vp9|av1|hevc)"
+}
+
+check-flake-input-version() {
+  jq ".nodes.\"$1\".locked.rev" flake.lock
+}
+
+clonecd() {
+  local repo_url repo_dir
+  if (($# > 1)); then
+    git clone "$1" "$2" && cd "$2"
+  elif (($# == 1)); then
+    repo_url="$1"
+    if [[ "$repo_url" =~ \.git$ ]]; then
+      repo_dir=$(basename "$repo_url" .git)
+    else
+      repo_dir=$(basename "$repo_url")
+    fi
+    git clone "$repo_url" && cd "$repo_dir"
+  else
+    printf 'Usage: clonecd <url> [directory]\n' >&2
+    return 1
+  fi
+}
+
+# MPV with multiple videos
+mpv-multi() {
+    if [ $# -lt 1 ] || [ $# -gt 4 ]; then
+    echo "Usage: mpv-multi video1 [video2] [video3] [video4]"
+        echo "Compares 1 - 4 videos side by side"
+        return 1
+    fi
+
+    local filter=""
+    local cmd="mpv --pause"
+
+    case $# in
+        1)
+            cmd="$cmd '$1'"
+            ;;
+        2)
+            filter="[vid1][vid2]hstack[vo]"
+            cmd="$cmd --lavfi-complex='$filter' '$1' --external-file='$2'"
+            ;;
+        3)
+            filter="[vid3]split[v3][v3tmp];[v3tmp]drawbox=c=black:t=fill[black];[vid1][vid2]hstack[top];[v3][black]hstack[bottom];[top][bottom]vstack[vo]"
+            cmd="$cmd --lavfi-complex='$filter' '$1' --external-file='$2' --external-file='$3'"
+            ;;
+        4)
+            filter="[vid1][vid2]hstack[top];[vid3][vid4]hstack[bottom];[top][bottom]vstack[vo]"
+            cmd="$cmd --lavfi-complex='$filter' '$1' --external-file='$2' --external-file='$3' --external-file='$4'"
+            ;;
+        esac
+
+    eval $cmd
 }
