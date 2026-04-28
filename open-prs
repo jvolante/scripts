@@ -8,10 +8,42 @@ set -euo pipefail
 declare -A repos
 pr_count=0
 
-# Search for PRs using gh search instead of pr list
-prs=$(gh search prs --author="@me" --state=open --json repository,title,number,url --limit 100 2>/dev/null || true)
+# Collect all hosts configured in gh
+mapfile -t hosts < <(gh auth status 2>&1 | awk '/^[^ ]/{host=$1} /Active account: true/{print host}' || true)
 
-if [ -z "$prs" ]; then
+if [ "${#hosts[@]}" -eq 0 ]; then
+  printf "No authenticated gh hosts found.\n"
+  exit 1
+fi
+
+graphql_query='
+  query {
+    search(query: "is:pr is:open author:@me", type: ISSUE, first: 100) {
+      nodes {
+        ... on PullRequest {
+          number
+          title
+          url
+          headRefName
+          baseRefName
+          repository { nameWithOwner }
+        }
+      }
+    }
+  }
+'
+
+# Fetch PRs from all hosts and combine results
+prs="[]"
+for host in "${hosts[@]}"; do
+  host_prs=$(gh api graphql --hostname "$host" -f query="$graphql_query" \
+    --jq '.data.search.nodes' 2>/dev/null || true)
+  if [ -n "$host_prs" ] && [ "$host_prs" != "[]" ] && [ "$host_prs" != "null" ]; then
+    prs=$(jq -s '.[0] + .[1]' <(printf '%s' "$prs") <(printf '%s' "$host_prs"))
+  fi
+done
+
+if [ -z "$prs" ] || [ "$prs" = "[]" ]; then
   printf "No open PRs found.\n"
   exit 0
 fi
@@ -21,6 +53,8 @@ while IFS= read -r line; do
   number=$(printf '%s\n' "$line" | jq -r '.number')
   title=$(printf '%s\n' "$line" | jq -r '.title')
   url=$(printf '%s\n' "$line" | jq -r '.url')
+  head=$(printf '%s\n' "$line" | jq -r '.headRefName')
+  base=$(printf '%s\n' "$line" | jq -r '.baseRefName')
   
   # Extract hostname from URL
   hostname=$(printf '%s\n' "$url" | sed -E 's|https?://([^/]+)/.*|\1|')
@@ -33,7 +67,7 @@ while IFS= read -r line; do
   if [ -n "${repos[$key]}" ]; then
     repos[$key]+=$'\n'
   fi
-  repos[$key]+=$(printf '  #%-4d %s\n           %s' "$number" "$title" "$url")
+  repos[$key]+=$(printf '  #%-4d %s\n           %s → %s\n           %s' "$number" "$title" "$head" "$base" "$url")
   pr_count=$((pr_count + 1))
 done < <(printf '%s\n' "$prs" | jq -c '.[]')
 
