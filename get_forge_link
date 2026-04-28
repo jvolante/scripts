@@ -1,14 +1,23 @@
 #!/usr/bin/env bash
 set -e
 
-remotes=$(git remote -v | grep \(push\)\$)
+remotes=$(git remote -v | grep '(push)$')
 origin_remote=$(printf "%s\n" "$remotes" | grep origin)
 
 if [[ ${#origin_remote} -ne 0 ]]; then
-    remote=origin_remote
+    remote="$origin_remote"
 else
     remote=$(printf "%s\n" "$remotes" | head -1)
 fi
 
-url=$(printf "%s\n" "$remote" | sed 's|[A-z0-9]\+  [A-z]\+@\([A-z0-9_-]\+\.[A-z0-9]\+\):\([A-z/_-]\+\)\.\w\+ .*$|\1/\2|g')
-printf "%s\n" "$url"
+# Extract the URL (second field)
+url=$(printf "%s\n" "$remote" | awk '{print $2}')
+
+# Handle both SSH (user@host:repo) and HTTPS (https://host/repo) formats
+if [[ $url =~ @([^:]+):(.+?)(\.git)?$ ]]; then
+    # SSH format
+    printf "%s\n" "${BASH_REMATCH[1]}/${BASH_REMATCH[2]}"
+elif [[ $url =~ https?://([^/]+)/(.+?)(\.git)?$ ]]; then
+    # HTTPS format
+    printf "%s\n" "${BASH_REMATCH[1]}/${BASH_REMATCH[2]}"
+fi
