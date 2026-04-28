@@ -7,13 +7,16 @@
     git-is-merged = final.callPackage ./pkgs/git-is-merged { inherit self; };
     jxl-converter = final.callPackage ./pkgs/jxl-converter { inherit self; };
     list-cpp-includes = final.callPackage ./pkgs/list-cpp-includes { inherit self; };
+    list-git-urls = final.callPackage ./pkgs/list-git-urls { inherit self; };
     mkgitremote = final.callPackage ./pkgs/mkgitremote { inherit self; };
     mklicense = final.callPackage ./pkgs/mklicense { inherit self; };
     omnimv = final.callPackage ./pkgs/omnimv { inherit self; };
+    open-prs = final.callPackage ./pkgs/open-prs { inherit self; };
     plantpreview = final.callPackage ./pkgs/plantpreview { inherit self; };
     replace-in-files = final.callPackage ./pkgs/replace-in-files { inherit self; };
     restore-gpg-keys = final.callPackage ./pkgs/restore-gpg-keys { inherit self; };
     rip-and-eject = final.callPackage ./pkgs/rip-and-eject { inherit self; };
+    split-to-lines = final.callPackage ./pkgs/split-to-lines { inherit self; };
     yamldiff = final.callPackage ./pkgs/yamldiff { inherit self; };
   };
 }

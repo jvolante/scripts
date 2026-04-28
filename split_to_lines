@@ -1,0 +1,6 @@
+#! /bin/sh
+# print each argument on it's own line
+for arg
+do
+    echo $arg
+done
