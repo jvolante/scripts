@@ -1,0 +1,56 @@
+#!/usr/bin/env bash
+
+# Script to display all open PRs organized by repository
+
+set -euo pipefail
+
+# Parse JSON and organize by repo and host
+declare -A repos
+pr_count=0
+
+# Search for PRs using gh search instead of pr list
+prs=$(gh search prs --author="@me" --state=open --json repository,title,number,url --limit 100 2>/dev/null || true)
+
+if [ -z "$prs" ]; then
+  printf "No open PRs found.\n"
+  exit 0
+fi
+
+while IFS= read -r line; do
+  repo=$(printf '%s\n' "$line" | jq -r '.repository.nameWithOwner')
+  number=$(printf '%s\n' "$line" | jq -r '.number')
+  title=$(printf '%s\n' "$line" | jq -r '.title')
+  url=$(printf '%s\n' "$line" | jq -r '.url')
+  
+  # Extract hostname from URL
+  hostname=$(printf '%s\n' "$url" | sed -E 's|https?://([^/]+)/.*|\1|')
+  
+  # Use hostname+repo as key to separate by host
+  key="$hostname|$repo"
+  if [ -z "${repos[$key]:-}" ]; then
+    repos[$key]=""
+  fi
+  if [ -n "${repos[$key]}" ]; then
+    repos[$key]+=$'\n'
+  fi
+  repos[$key]+=$(printf '  #%-4d %s\n           %s' "$number" "$title" "$url")
+  pr_count=$((pr_count + 1))
+done < <(printf '%s\n' "$prs" | jq -c '.[]')
+
+# Check if we have any PRs
+if [ "$pr_count" -eq 0 ]; then
+  printf "No open PRs found.\n"
+  exit 0
+fi
+
+# Display organized output
+printf "Your Open Pull Requests\n"
+printf "=======================\n\n"
+
+for key in $(printf '%s\n' "${!repos[@]}" | sort); do
+  hostname=$(printf '%s\n' "$key" | cut -d'|' -f1)
+  repo=$(printf '%s\n' "$key" | cut -d'|' -f2)
+  printf "\n%s (%s)\n" "$repo" "$hostname"
+  printf "%s\n" "$(printf '%0.s-' $(seq 1 $((${#repo} + ${#hostname} + 3))))"
+  printf "%s\n" "${repos[$key]}"
+done
