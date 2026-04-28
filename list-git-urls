@@ -1,0 +1,39 @@
+#!/usr/bin/env bash
+# List all unique git URLs for repositories that are direct subdirectories
+
+set -euo pipefail
+
+if [[ $# -ne 1 ]]; then
+    printf "Usage: %s <directory>\n" "$0" >&2
+    exit 1
+fi
+
+target_dir="$1"
+
+if [[ ! -d "$target_dir" ]]; then
+    printf "Error: %s is not a valid directory\n" "$target_dir" >&2
+    exit 1
+fi
+
+# Store URLs temporarily
+declare -A urls
+
+# Iterate over direct subdirectories
+for subdir in "$target_dir"/*; do
+    if [[ ! -d "$subdir" ]]; then
+        continue
+    fi
+    
+    # Check if subdirectory is a git repository
+    if [[ -d "$subdir/.git" ]]; then
+        # Extract the remote URL
+        if url=$(git -C "$subdir" config --get remote.origin.url 2>/dev/null); then
+            urls["$url"]=1
+        fi
+    fi
+done
+
+# Print unique URLs
+for url in "${!urls[@]}"; do
+    printf "%s\n" "$url"
+done
