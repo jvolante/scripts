@@ -37,6 +37,7 @@ alias make="make -j"
 alias bush="rg --files | tree --fromfile"
 alias mv="omnimv"
 alias av='source .venv/bin/activate || source venv/bin/activate'
+alias cp='cp --reflink=auto'
 alias e='$EDITOR'
 alias memhog='ps -eo user,pid,cmd,%mem,rss --sort=-rss | awk '\''NR==1{print $0; next} {printf "%-15s %-10s %-30s %5s %10s\n", $1, $2, $3, $4, $5/1024 " MB"}'\'' | head -n 11'
 
