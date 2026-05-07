@@ -1,5 +1,9 @@
 export PROMPT_COMMAND='history -a'
 
+if [ -f "${XDG_CONFIG_DIR:-$HOME/.config}/opencode/bash_env.sh" ]; then
+  source "${XDG_CONFIG_DIR:-$HOME/.config}/opencode/bash_env.sh"
+fi
+
 shopt -s globstar
 
 # don't put duplicate lines or lines starting with space in the history.
