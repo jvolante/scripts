@@ -84,7 +84,25 @@ fi
 
 # --json mode: emit enriched PR array and exit
 if [ "$json_output" = true ]; then
-  printf '%s\n' "$prs"
+  printf '%s\n' "$prs" | jq '
+    def cci_slug(url):
+      url | capture("https?://[^/]+/gh/(?<org>[^/]+)/(?<repo>[^/]+)/")
+      | "github/\(.org)/\(.repo)";
+
+    [.[] | .commits.nodes[0].commit.statusCheckRollup.contexts.nodes |= (
+      if . == null then null
+      else [.[] |
+        if .__typename == "CheckRun" then
+          { name, status, conclusion,
+            circleci_slug: (try cci_slug(.detailsUrl) catch null) }
+        elif .__typename == "StatusContext" then
+          { context, state,
+            circleci_slug: (try cci_slug(.targetUrl) catch null) }
+        else . end
+      ]
+      end
+    )]
+  '
   exit 0
 fi
 
