@@ -422,7 +422,10 @@ cci-builds() {
   local limit="${3:-25}"
   local endpoint="v1.1/project/${slug}"
   if [[ -n "$branch" ]]; then
-    endpoint="v1.1/project/${slug}/tree/${branch}"
+    # URL-encode slashes in branch names (e.g. user/feature-branch)
+    local encoded_branch
+    encoded_branch="$(printf '%s' "$branch" | python3 -c 'import sys,urllib.parse; print(urllib.parse.quote(sys.stdin.read(), safe=""))')"
+    endpoint="v1.1/project/${slug}/tree/${encoded_branch}"
   fi
   cci-curl "${endpoint}" -G --data-urlencode "limit=${limit}" \
   | jq '.[] | {
@@ -456,6 +459,9 @@ cci-workflow() {
 }
 
 # Get build log output for a single job
+# Get build log output for a single job.
+# Falls back to fetching presigned output URLs from the v1.1 job detail when
+# the direct /output endpoint returns a non-JSON 404 (common on self-hosted CCI).
 # Usage: cci-log <project-slug> <build-num>
 # Example: cci-log github/my-org/my-repo 3001
 cci-log() {
@@ -463,8 +469,28 @@ cci-log() {
     printf 'Usage: cci-log <project-slug> <build-num>\n' >&2
     return 1
   fi
-  cci-curl "v1.1/project/$1/$2/output" \
-  | jq -r '.[] | .output[] | .message' 2>/dev/null
+  local slug="$1"
+  local build_num="$2"
+
+  # Try the direct output endpoint first
+  local direct
+  direct=$(cci-curl "v1.1/project/${slug}/${build_num}/output" 2>/dev/null)
+  if echo "$direct" | jq -e '.[0].output' >/dev/null 2>&1; then
+    echo "$direct" | jq -r '.[] | .output[] | .message' 2>/dev/null
+    return
+  fi
+
+  # Fall back: extract presigned output_url values from the job detail and fetch each
+  local urls
+  urls=$(cci-curl "v1.1/project/${slug}/${build_num}" 2>/dev/null \
+    | jq -r '[.steps[]? | .actions[]? | select(.output_url != null) | .output_url] | .[]' 2>/dev/null)
+  if [[ -z "$urls" ]]; then
+    printf 'cci-log: no output available for build %s\n' "$build_num" >&2
+    return 1
+  fi
+  while IFS= read -r url; do
+    curl -s "$url" | jq -r '.[].message' 2>/dev/null
+  done <<< "$urls"
 }
 
 # Rerun a failed workflow from failed jobs
@@ -505,4 +531,58 @@ cci-projects() {
       url:      .vcs_url,
       branches: (.branches | keys | length)
     }'
+}
+
+# Show the latest pipeline and workflow statuses for the current git branch.
+# Infers the project slug from the git remote URL and the branch from git.
+# Usage: cci-current
+cci-current() {
+  local remote_url branch slug org repo pipeline_id
+  remote_url=$(git remote get-url origin 2>/dev/null)
+  if [[ -z "$remote_url" ]]; then
+    printf 'cci-current: not inside a git repo with an origin remote\n' >&2
+    return 1
+  fi
+  branch=$(git branch --show-current 2>/dev/null)
+  if [[ -z "$branch" ]]; then
+    printf 'cci-current: could not determine current branch\n' >&2
+    return 1
+  fi
+
+  # Parse org/repo from SSH (git@host:org/repo.git) or HTTPS (https://host/org/repo.git)
+  if [[ "$remote_url" =~ ^git@[^:]+:([^/]+)/(.+)\.git$ ]]; then
+    org="${BASH_REMATCH[1]}"
+    repo="${BASH_REMATCH[2]}"
+  elif [[ "$remote_url" =~ ^https?://[^/]+/([^/]+)/(.+?)(.git)?$ ]]; then
+    org="${BASH_REMATCH[1]}"
+    repo="${BASH_REMATCH[2]}"
+  else
+    printf 'cci-current: could not parse org/repo from remote URL: %s\n' "$remote_url" >&2
+    return 1
+  fi
+  slug="github/${org}/${repo}"
+
+  local encoded_branch
+  encoded_branch="$(printf '%s' "$branch" | python3 -c 'import sys,urllib.parse; print(urllib.parse.quote(sys.stdin.read(), safe=""))')"
+
+  printf 'Project : %s\n' "$slug"
+  printf 'Branch  : %s\n' "$branch"
+
+  pipeline_id=$(cci-curl "v2/project/${slug}/pipeline?branch=${encoded_branch}" 2>/dev/null \
+    | jq -r '.items[0].id // empty')
+  if [[ -z "$pipeline_id" ]]; then
+    printf 'No pipelines found for this branch.\n' >&2
+    return 1
+  fi
+
+  local pipeline_meta
+  pipeline_meta=$(cci-curl "v2/pipeline/${pipeline_id}" 2>/dev/null \
+    | jq '{number, state, created_at}')
+  printf 'Pipeline: %s\n\n' "$(echo "$pipeline_meta" | jq -r '"#\(.number)  state=\(.state)  created=\(.created_at)"')"
+
+  cci-curl "v2/pipeline/${pipeline_id}/workflow" 2>/dev/null \
+  | jq -r '.items[] | "\(.status)\t\(.name)\t\(.id)"' \
+  | while IFS=$'\t' read -r status name wf_id; do
+      printf '  %-10s  %s\n' "$status" "$name"
+    done
 }
