@@ -4,9 +4,14 @@
 
 set -euo pipefail
 
-# Parse JSON and organize by repo and host
-declare -A repos
-pr_count=0
+# Parse arguments
+json_output=false
+for arg in "$@"; do
+  case "$arg" in
+    --json) json_output=true ;;
+    *) printf "Unknown argument: %s\n" "$arg" >&2; exit 1 ;;
+  esac
+done
 
 # Collect all hosts configured in gh
 mapfile -t hosts < <(gh auth status 2>&1 | awk '/^[^ ]/{host=$1} /Active account: true/{print host}' || true)
@@ -27,6 +32,31 @@ graphql_query='
           headRefName
           baseRefName
           repository { nameWithOwner }
+          commits(last: 1) {
+            nodes {
+              commit {
+                statusCheckRollup {
+                  state
+                  contexts(first: 50) {
+                    nodes {
+                      __typename
+                      ... on CheckRun {
+                        name
+                        status
+                        conclusion
+                        detailsUrl
+                      }
+                      ... on StatusContext {
+                        context
+                        state
+                        targetUrl
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
         }
       }
     }
@@ -44,9 +74,23 @@ for host in "${hosts[@]}"; do
 done
 
 if [ -z "$prs" ] || [ "$prs" = "[]" ]; then
-  printf "No open PRs found.\n"
+  if [ "$json_output" = true ]; then
+    printf '[]\n'
+  else
+    printf "No open PRs found.\n"
+  fi
   exit 0
 fi
+
+# --json mode: emit enriched PR array and exit
+if [ "$json_output" = true ]; then
+  printf '%s\n' "$prs"
+  exit 0
+fi
+
+# Build display structures
+declare -A repos
+pr_count=0
 
 while IFS= read -r line; do
   repo=$(printf '%s\n' "$line" | jq -r '.repository.nameWithOwner')
@@ -55,19 +99,41 @@ while IFS= read -r line; do
   url=$(printf '%s\n' "$line" | jq -r '.url')
   head=$(printf '%s\n' "$line" | jq -r '.headRefName')
   base=$(printf '%s\n' "$line" | jq -r '.baseRefName')
-  
+
   # Extract hostname from URL
   hostname=$(printf '%s\n' "$url" | sed -E 's|https?://([^/]+)/.*|\1|')
-  
+
   # Use hostname+repo as key to separate by host
   key="$hostname|$repo"
   if [ -z "${repos[$key]:-}" ]; then
     repos[$key]=""
   fi
+
+  # Build failing CI lines
+  failing_ci=$(printf '%s\n' "$line" | jq -r '
+    (.commits.nodes[0].commit.statusCheckRollup.contexts.nodes // [])
+    | .[]
+    | if .__typename == "CheckRun" then
+        select(.conclusion == "FAILURE" or .conclusion == "TIMED_OUT" or .conclusion == "CANCELLED")
+        | "           [FAIL] \(.name)\n                  \(.detailsUrl)"
+      elif .__typename == "StatusContext" then
+        select(.state == "FAILURE" or .state == "ERROR")
+        | "           [FAIL] \(.context)\n                  \(.targetUrl)"
+      else empty
+      end
+  ')
+
+  pr_block=$(printf '  #%-4d %s\n           %s \u2192 %s\n           %s' \
+    "$number" "$title" "$head" "$base" "$url")
+
+  if [ -n "$failing_ci" ]; then
+    pr_block=$(printf '%s\n%s' "$pr_block" "$failing_ci")
+  fi
+
   if [ -n "${repos[$key]}" ]; then
     repos[$key]+=$'\n'
   fi
-  repos[$key]+=$(printf '  #%-4d %s\n           %s → %s\n           %s' "$number" "$title" "$head" "$base" "$url")
+  repos[$key]+="$pr_block"
   pr_count=$((pr_count + 1))
 done < <(printf '%s\n' "$prs" | jq -c '.[]')
 
