@@ -32,6 +32,12 @@ graphql_query='
           headRefName
           baseRefName
           repository { nameWithOwner }
+          reviews(last: 50, states: [CHANGES_REQUESTED]) {
+            nodes {
+              author { login }
+              state
+            }
+          }
           commits(last: 1) {
             nodes {
               commit {
@@ -141,11 +147,22 @@ while IFS= read -r line; do
       end
   ')
 
+  # Build changes-requested lines (deduplicate reviewers)
+  changes_requested=$(printf '%s\n' "$line" | jq -r '
+    (.reviews.nodes // [])
+    | [.[].author.login] | unique | .[]
+    | "           [CHANGES REQUESTED] \(.)"
+  ')
+
   pr_block=$(printf '  #%-4d %s\n           %s \u2192 %s\n           %s' \
     "$number" "$title" "$head" "$base" "$url")
 
   if [ -n "$failing_ci" ]; then
     pr_block=$(printf '%s\n%s' "$pr_block" "$failing_ci")
+  fi
+
+  if [ -n "$changes_requested" ]; then
+    pr_block=$(printf '%s\n%s' "$pr_block" "$changes_requested")
   fi
 
   if [ -n "${repos[$key]}" ]; then
