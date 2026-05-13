@@ -533,6 +533,256 @@ cci-projects() {
     }'
 }
 
+# Fetch logs for the most recently failed job on the current branch (or a given slug+branch).
+# Infers the project slug and branch from git when not provided.
+# Usage: cci-failed-logs [project-slug [branch]]
+# Examples:
+#   cci-failed-logs
+#   cci-failed-logs github/my-org/my-repo
+#   cci-failed-logs github/my-org/my-repo feature/my-branch
+cci-failed-logs() {
+  local slug branch org repo remote_url
+
+  if [[ $# -ge 1 ]]; then
+    slug="$1"
+    branch="${2:-}"
+  else
+    remote_url=$(git remote get-url origin 2>/dev/null)
+    if [[ -z "$remote_url" ]]; then
+      printf 'cci-failed-logs: not inside a git repo with an origin remote\n' >&2
+      return 1
+    fi
+    if [[ "$remote_url" =~ ^git@[^:]+:([^/]+)/(.+)\.git$ ]]; then
+      org="${BASH_REMATCH[1]}"
+      repo="${BASH_REMATCH[2]}"
+    elif [[ "$remote_url" =~ ^https?://[^/]+/([^/]+)/(.+?)(.git)?$ ]]; then
+      org="${BASH_REMATCH[1]}"
+      repo="${BASH_REMATCH[2]}"
+    else
+      printf 'cci-failed-logs: could not parse org/repo from remote URL: %s\n' "$remote_url" >&2
+      return 1
+    fi
+    slug="github/${org}/${repo}"
+    branch=$(git branch --show-current 2>/dev/null)
+    if [[ -z "$branch" ]]; then
+      printf 'cci-failed-logs: could not determine current branch\n' >&2
+      return 1
+    fi
+  fi
+
+  printf 'Project : %s\n' "$slug"
+  printf 'Branch  : %s\n\n' "$branch"
+
+  # Find the most recently failed build on this branch
+  local failed_build
+  failed_build=$(cci-builds "$slug" "$branch" 25 \
+    | jq -s 'map(select(.status == "failed")) | first | {build_num, job, workflow}')
+
+  if [[ -z "$failed_build" || "$failed_build" == "null" ]]; then
+    printf 'No failed builds found for %s on %s\n' "$slug" "$branch" >&2
+    return 1
+  fi
+
+  local build_num job_name workflow_name
+  build_num=$(printf '%s' "$failed_build" | jq -r '.build_num')
+  job_name=$(printf '%s' "$failed_build" | jq -r '.job')
+  workflow_name=$(printf '%s' "$failed_build" | jq -r '.workflow')
+
+  printf 'Failed job : %s / %s  (build #%s)\n\n' "$workflow_name" "$job_name" "$build_num"
+
+  cci-log "$slug" "$build_num"
+}
+
+# Wait for all CI jobs on the current branch's remote HEAD to finish, then print a summary.
+# If any jobs failed, prints their logs automatically. Exits non-zero if any job failed.
+#
+# Only watches pipelines whose revision matches the current remote tracking SHA, so a
+# stale in-progress pipeline from a previous push is ignored.
+#
+# Usage: cci-wait-on-jobs [project-slug [branch]] [--interval <seconds>] [--timeout <seconds>] [--progress]
+# Options:
+#   --interval <seconds>  Poll interval (default: 30)
+#   --timeout  <seconds>  Give up after this many seconds (default: 3600)
+#   --progress            Print a live job-status table on each poll cycle
+# Examples:
+#   cci-wait-on-jobs
+#   cci-wait-on-jobs --progress
+#   cci-wait-on-jobs github/my-org/my-repo feature/my-branch --interval 15 --progress
+cci-wait-on-jobs() {
+  local slug branch org repo remote_url
+  local interval=30 timeout=3600 progress=0
+
+  # --- parse args (positional slug/branch first, then flags) ------------------
+  local positional=()
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --interval) interval="$2"; shift 2 ;;
+      --timeout)  timeout="$2";  shift 2 ;;
+      --progress) progress=1;    shift   ;;
+      *)          positional+=("$1"); shift ;;
+    esac
+  done
+
+  if [[ ${#positional[@]} -ge 1 ]]; then
+    slug="${positional[0]}"
+    branch="${positional[1]:-}"
+  else
+    remote_url=$(git remote get-url origin 2>/dev/null)
+    if [[ -z "$remote_url" ]]; then
+      printf 'cci-wait-on-jobs: not inside a git repo with an origin remote\n' >&2
+      return 1
+    fi
+    if [[ "$remote_url" =~ ^git@[^:]+:([^/]+)/(.+)\.git$ ]]; then
+      org="${BASH_REMATCH[1]}"; repo="${BASH_REMATCH[2]}"
+    elif [[ "$remote_url" =~ ^https?://[^/]+/([^/]+)/(.+?)(.git)?$ ]]; then
+      org="${BASH_REMATCH[1]}"; repo="${BASH_REMATCH[2]}"
+    else
+      printf 'cci-wait-on-jobs: could not parse org/repo from remote URL: %s\n' "$remote_url" >&2
+      return 1
+    fi
+    slug="github/${org}/${repo}"
+    branch=$(git branch --show-current 2>/dev/null)
+    if [[ -z "$branch" ]]; then
+      printf 'cci-wait-on-jobs: could not determine current branch\n' >&2
+      return 1
+    fi
+  fi
+
+  # --- resolve the remote HEAD SHA for this branch ----------------------------
+  # Use the tracking ref if branch was inferred from git; otherwise ask the remote.
+  local remote_sha
+  if [[ -n "$(git rev-parse --git-dir 2>/dev/null)" ]]; then
+    remote_sha=$(git rev-parse "origin/${branch}" 2>/dev/null)
+  fi
+  if [[ -z "$remote_sha" ]]; then
+    printf 'cci-wait-on-jobs: could not resolve remote SHA for origin/%s\n' "$branch" >&2
+    return 1
+  fi
+
+  local encoded_branch
+  encoded_branch="$(printf '%s' "$branch" | python3 -c 'import sys,urllib.parse; print(urllib.parse.quote(sys.stdin.read(), safe=""))')"
+
+  # --- find the pipeline for the current remote SHA ---------------------------
+  local pipeline_id pipeline_num
+  printf 'Waiting for CI on %s @ %s...\n' "$branch" "${remote_sha:0:8}"
+
+  # CCI returns pipelines newest-first; scan up to 10 to find one matching our SHA.
+  local pipeline_json
+  pipeline_json=$(cci-curl "v2/project/${slug}/pipeline?branch=${encoded_branch}" 2>/dev/null \
+    | jq --arg sha "$remote_sha" '
+        .items | map(select(.vcs.revision == $sha)) | first
+        | {id, number}')
+  pipeline_id=$(printf '%s' "$pipeline_json" | jq -r '.id // empty')
+  pipeline_num=$(printf '%s' "$pipeline_json" | jq -r '.number // empty')
+
+  if [[ -z "$pipeline_id" ]]; then
+    printf 'cci-wait-on-jobs: no pipeline found for SHA %s on %s\n' "${remote_sha:0:8}" "$branch" >&2
+    printf 'Is the push complete and has CCI picked it up yet?\n' >&2
+    return 1
+  fi
+
+  printf 'Pipeline #%s (%s)\n\n' "$pipeline_num" "${pipeline_id:0:8}"
+
+  # --- poll until all workflows are in a terminal state -----------------------
+  # Workflow terminal states: success, failed, error, canceled, unauthorised
+  # Note: "failing" means jobs have failed but others are still running — not terminal.
+  local terminal_states='["success","failed","error","canceled","unauthorised"]'
+  local elapsed=0
+
+  while true; do
+    local workflows_json
+    workflows_json=$(cci-curl "v2/pipeline/${pipeline_id}/workflow" 2>/dev/null \
+      | jq '[.items[] | {id, name, status}]')
+
+    local all_done
+    all_done=$(printf '%s' "$workflows_json" \
+      | jq --argjson t "$terminal_states" 'all(.status as $s | $t | contains([$s]))')
+
+    if [[ "$progress" -eq 1 ]]; then
+      # Build a compact status line showing workflow status with job detail for
+      # in-progress workflows. Completed workflows show as "name:✓/✗" only.
+      # In-progress workflows show each non-successful job: "name: job1:… job2:✗"
+      local status_line="[${elapsed}s]"
+      local wf_id wf_name wf_status
+      while IFS=$'\t' read -r wf_id wf_name wf_status; do
+        local wf_sym
+        case "$wf_status" in
+          success)                      wf_sym="✓" ;;
+          failed|error|unauthorised)    wf_sym="✗" ;;
+          *)                            wf_sym="…" ;;
+        esac
+
+        if [[ "$wf_status" == "success" || "$wf_status" == "failed" || "$wf_status" == "error" ]]; then
+          # Terminal — just show symbol, no job detail needed
+          status_line+="  ${wf_name}:${wf_sym}"
+        else
+          # Still running — show each job that isn't successful
+          local job_parts=""
+          local job_name job_status job_sym
+          while IFS=$'\t' read -r job_name job_status; do
+            case "$job_status" in
+              success)  continue ;;          # skip successful jobs to reduce noise
+              failed)   job_sym="✗" ;;
+              running)  job_sym="…" ;;
+              *)        job_sym="?" ;;       # blocked, not_run, etc.
+            esac
+            job_parts+=" ${job_name}:${job_sym}"
+          done < <(cci-curl "v2/workflow/${wf_id}/job" 2>/dev/null \
+            | jq -r '.items[] | "\(.name)\t\(.status)"' 2>/dev/null)
+          status_line+="  ${wf_name}:${wf_sym}${job_parts}"
+        fi
+      done < <(printf '%s' "$workflows_json" | jq -r '.[] | "\(.id)\t\(.name)\t\(.status)"')
+      printf '\r\033[K%s' "$status_line"
+    fi
+
+    if [[ "$all_done" == "true" ]]; then
+      [[ "$progress" -eq 1 ]] && printf '\n'
+      break
+    fi
+
+    if [[ "$elapsed" -ge "$timeout" ]]; then
+      [[ "$progress" -eq 1 ]] && printf '\n'
+      printf '\ncci-wait-on-jobs: timed out after %ds\n' "$timeout" >&2
+      return 1
+    fi
+
+    sleep "$interval"
+    elapsed=$(( elapsed + interval ))
+  done
+
+  # --- final summary ----------------------------------------------------------
+  local workflows_final
+  workflows_final=$(cci-curl "v2/pipeline/${pipeline_id}/workflow" 2>/dev/null \
+    | jq '[.items[] | {id, name, status}]')
+
+  printf 'Pipeline #%s complete:\n' "$pipeline_num"
+  local wf_name wf_status
+  while IFS=$'\t' read -r wf_name wf_status; do
+    printf '  %-12s %s\n' "$wf_status" "$wf_name"
+  done < <(printf '%s' "$workflows_final" | jq -r '.[] | "\(.name)\t\(.status)"')
+  printf '\n'
+
+  # --- print logs for each failed job (skip cancelled) ------------------------
+  # Enumerate failed jobs directly from the pipeline's workflows via v2 API so
+  # we are scoped to exactly this pipeline, not just recent branch builds.
+  local any_failed=0
+  local wf_id wf_name wf_status
+  while IFS=$'\t' read -r wf_id wf_name wf_status; do
+    [[ "$wf_status" != "failed" && "$wf_status" != "error" ]] && continue
+    local job_name job_status job_number
+    while IFS=$'\t' read -r job_name job_status job_number; do
+      [[ "$job_status" != "failed" ]] && continue
+      any_failed=1
+      printf '=== %s / %s (build #%s) ===\n\n' "$wf_name" "$job_name" "$job_number"
+      cci-log "$slug" "$job_number"
+      printf '\n'
+    done < <(cci-curl "v2/workflow/${wf_id}/job" 2>/dev/null \
+      | jq -r '.items[] | "\(.name)\t\(.status)\t\(.job_number)"')
+  done < <(printf '%s' "$workflows_final" | jq -r '.[] | "\(.id)\t\(.name)\t\(.status)"')
+
+  return "$any_failed"
+}
+
 # Show the latest pipeline and workflow statuses for the current git branch.
 # Infers the project slug from the git remote URL and the branch from git.
 # Usage: cci-current
