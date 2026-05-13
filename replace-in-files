@@ -1,0 +1,219 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+# Perform regex find-and-replace across multiple files in parallel.
+# Uses ripgrep for file discovery (auto-skips binary files, respects .gitignore)
+# and sd for replacement (Rust regex: \d, \w, \b, lookaheads, named captures).
+
+usage() {
+    cat <<EOF
+Usage: $(basename "$0") [OPTIONS] <pattern> <replacement> <directories...>
+
+Perform regex find-and-replace across files in specified directories.
+By default modifies files in place.
+
+Pattern and replacement use Rust regex syntax (via sd):
+  \\d  \\w  \\b  \\s  (?:...)  lookaheads  named captures (?P<name>...)
+  Capture groups referenced in replacement as \$1, \$2, or \${name}
+
+OPTIONS:
+    -t, --type TYPE     Filter by file type (can be specified multiple times)
+                        Uses ripgrep type names: py, js, rs, md, cpp, sh, etc.
+                        Run 'rg --type-list' to see all available types
+    -j, --jobs NUM      Max number of parallel jobs (default: nproc)
+    -b, --backup EXT    Create backup files with specified extension (e.g., .bak, .orig)
+    -d, --dry-run       Show changes without modifying files
+    -h, --help          Show this help message
+
+ARGUMENTS:
+    pattern             Rust regex pattern to search for
+    replacement         Replacement string (use \$1, \$2 for capture groups)
+    directories         One or more directories to search
+
+EXAMPLES:
+    # Rename a symbol in Python files
+    $(basename "$0") -t py 'old_name' 'new_name' src/
+
+    # Rename with word boundary to avoid partial matches
+    $(basename "$0") '\bold_name\b' 'new_name' src/
+
+    # Use a capture group
+    $(basename "$0") 'ISL-(\d+)' 'PROJ-\$1' .
+
+    # Dry-run: show what would change
+    $(basename "$0") -d 'foo' 'bar' src/
+
+    # Multiple file types
+    $(basename "$0") -t cpp -t hpp 'OldClass' 'NewClass' src/
+
+    # All text files (no type filter)
+    $(basename "$0") '2024' '2025' ./
+
+    # Limit to 4 parallel jobs
+    $(basename "$0") -j 4 'foo' 'bar' src/
+
+    # Create backup files before modifying
+    $(basename "$0") -b .bak 'foo' 'bar' ./
+
+EOF
+    exit 0
+}
+
+# Parse arguments
+types=()
+dry_run=0
+parallel_jobs=""
+backup_ext=""
+
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        -h|--help)
+            usage
+            ;;
+        -t|--type)
+            if [[ -z "${2:-}" ]]; then
+                printf "Error: -t/--type requires an argument\n" >&2
+                exit 1
+            fi
+            types+=("$2")
+            shift 2
+            ;;
+        -j|--jobs)
+            if [[ -z "${2:-}" ]]; then
+                printf "Error: -j/--jobs requires an argument\n" >&2
+                exit 1
+            fi
+            if ! [[ "$2" =~ ^[1-9][0-9]*$ ]]; then
+                printf "Error: -j/--jobs must be a positive integer\n" >&2
+                exit 1
+            fi
+            parallel_jobs="$2"
+            shift 2
+            ;;
+        -b|--backup)
+            if [[ -z "${2:-}" ]]; then
+                printf "Error: -b/--backup requires an argument\n" >&2
+                exit 1
+            fi
+            backup_ext="$2"
+            shift 2
+            ;;
+        -d|--dry-run)
+            dry_run=1
+            shift
+            ;;
+        -*)
+            printf "Error: Unknown option: %s\n" "$1" >&2
+            printf "Use -h or --help for usage information\n" >&2
+            exit 1
+            ;;
+        *)
+            break
+            ;;
+    esac
+done
+
+# Check for required arguments
+if [[ $# -lt 3 ]]; then
+    printf "Error: Missing required arguments\n" >&2
+    printf "Use -h or --help for usage information\n" >&2
+    exit 1
+fi
+
+pattern="$1"
+replacement="$2"
+shift 2
+directories=("$@")
+
+# Validate directories
+for dir in "${directories[@]}"; do
+    if [[ ! -d "$dir" ]]; then
+        printf "Error: Directory not found: %s\n" "$dir" >&2
+        exit 1
+    fi
+done
+
+# Build ripgrep file-discovery command
+rg_cmd=(rg --files)
+for type in "${types[@]}"; do
+    rg_cmd+=(-t "$type")
+done
+rg_cmd+=("${directories[@]}")
+
+# Default parallelism
+if [[ -z "$parallel_jobs" ]]; then
+    parallel_jobs=$(nproc)
+fi
+
+# Process a single file.
+process_file() {
+    local file="$1"
+    local pat="$2"
+    local rep="$3"
+    local is_dry_run="$4"
+    local backup_extension="$5"
+
+    if [[ "$is_dry_run" -eq 1 ]]; then
+        # Run sd in preview mode (outputs transformed content) and diff against original.
+        # diff headers go to stdout so output can be piped directly into patch(1).
+        # Informational messages go to stderr to avoid corrupting the diff stream.
+        local transformed diff_out rel_file output
+        transformed=$(sd --preview "$pat" "$rep" "$file" 2>/dev/null) || {
+            printf "Warning: Failed to process %s\n" "$file" >&2
+            return 1
+        }
+        if [[ "$transformed" != "$(cat "$file")" ]]; then
+            # Use a path relative to PWD so patch(1) can apply the result
+            # without --unsafe-paths: patch -p0 < changes.patch
+            rel_file=$(realpath --relative-to="$PWD" "$file")
+            printf "Would modify: %s\n" "$rel_file" >&2
+            # Build the full diff block in a variable before printing so the
+            # single printf is the only write — no interleaving possible.
+            diff_out=$(diff -u "$file" - <<< "$transformed" || true)
+            output=$(printf '%s\n' "$diff_out" \
+                | sed -e "s|^--- .*|--- ${rel_file}|" \
+                      -e "s|^+++ .*|+++ ${rel_file}|")
+            printf '%s\n\n' "$output"
+        fi
+    else
+        if [[ -n "$backup_extension" ]]; then
+            cp "$file" "${file}${backup_extension}" 2>/dev/null || {
+                printf "Warning: Failed to create backup for %s\n" "$file" >&2
+                return 1
+            }
+        fi
+        sd "$pat" "$rep" "$file" 2>/dev/null || {
+            printf "Warning: Failed to process %s\n" "$file" >&2
+            return 1
+        }
+    fi
+}
+
+if [[ "$dry_run" -eq 1 ]]; then
+    printf "Running in DRY-RUN mode - no files will be modified\n" >&2
+    printf "Remove -d or --dry-run to apply changes\n" >&2
+    # Dry-run is serial: coherent stdout is more important than speed, and
+    # the bottleneck is sd+diff I/O anyway.
+    while IFS= read -r file; do
+        process_file "$file" "$pattern" "$replacement" 1 "$backup_ext"
+    done < <("${rg_cmd[@]}")
+else
+    # In-place: dispatch jobs as filenames arrive from rg — no need to buffer
+    # the full list first. Each job writes to a different file so there are no
+    # stdout races.
+    running=0
+    while IFS= read -r file; do
+        process_file "$file" "$pattern" "$replacement" 0 "$backup_ext" &
+        running=$(( running + 1 ))
+
+        # Throttle: when the pool is full, wait for any one job to finish.
+        if [[ "$running" -ge "$parallel_jobs" ]]; then
+            wait -n || true
+            running=$(( running - 1 ))
+        fi
+    done < <("${rg_cmd[@]}")
+
+    # Drain remaining jobs.
+    wait
+fi
