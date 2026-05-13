@@ -1,0 +1,207 @@
+#!/usr/bin/env bash
+
+# Script to display all PRs where you've been requested to review
+
+set -euo pipefail
+
+# Parse arguments
+json_output=false
+ignore_failing_ci=false
+for arg in "$@"; do
+  case "$arg" in
+    --json) json_output=true ;;
+    --ignore-failing-ci) ignore_failing_ci=true ;;
+    *) printf "Unknown argument: %s\n" "$arg" >&2; exit 1 ;;
+  esac
+done
+
+# Collect all hosts configured in gh
+mapfile -t hosts < <(gh auth status 2>&1 | awk '/^[^ ]/{host=$1} /Active account: true/{print host}' || true)
+
+if [ "${#hosts[@]}" -eq 0 ]; then
+  printf "No authenticated gh hosts found.\n"
+  exit 1
+fi
+
+graphql_query='
+  query {
+    search(query: "is:pr is:open review-requested:@me", type: ISSUE, first: 100) {
+      nodes {
+        ... on PullRequest {
+          number
+          title
+          url
+          headRefName
+          baseRefName
+          repository { nameWithOwner }
+          author { login }
+          reviewRequests(first: 50) {
+            nodes {
+              requestedReviewer {
+                __typename
+                ... on User { login }
+                ... on Team { name }
+              }
+            }
+          }
+          commits(last: 1) {
+            nodes {
+              commit {
+                statusCheckRollup {
+                  state
+                  contexts(first: 50) {
+                    nodes {
+                      __typename
+                      ... on CheckRun {
+                        name
+                        status
+                        conclusion
+                        detailsUrl
+                        isRequired: requiredStatusCheckRollup
+                      }
+                      ... on StatusContext {
+                        context
+                        state
+                        targetUrl
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+'
+
+# Fetch PRs from all hosts and combine results
+prs="[]"
+for host in "${hosts[@]}"; do
+  host_prs=$(gh api graphql --hostname "$host" -f query="$graphql_query" 2>/dev/null | jq '.data.search.nodes // []' || printf '[]')
+  if [ -n "$host_prs" ] && [ "$host_prs" != "[]" ] && [ "$host_prs" != "null" ]; then
+    prs=$(jq -s 'if (.[1] | type) == "array" then .[0] + .[1] else .[0] end' <(printf '%s' "$prs") <(printf '%s' "$host_prs"))
+  fi
+done
+
+if [ -z "$prs" ] || [ "$prs" = "[]" ]; then
+  if [ "$json_output" = true ]; then
+    printf '[]\n'
+  else
+    printf "No PRs requesting your review found.\n"
+  fi
+  exit 0
+fi
+
+# Filter out PRs with failing required CI if --ignore-failing-ci is set
+if [ "$ignore_failing_ci" = true ]; then
+  prs=$(printf '%s\n' "$prs" | jq '[.[] | 
+    select(
+      (.commits.nodes[0].commit.statusCheckRollup.contexts.nodes // [])
+      | map(select(.__typename == "CheckRun" and .isRequired == true and (.conclusion == "FAILURE" or .conclusion == "TIMED_OUT" or .conclusion == "CANCELLED")))
+      | length == 0
+    )
+  ]')
+fi
+
+if [ -z "$prs" ] || [ "$prs" = "[]" ]; then
+  if [ "$json_output" = true ]; then
+    printf '[]\n'
+  else
+    printf "No PRs requesting your review found (after filtering).\n"
+  fi
+  exit 0
+fi
+
+# --json mode: emit enriched PR array and exit
+if [ "$json_output" = true ]; then
+  printf '%s\n' "$prs" | jq '
+    def cci_slug(url):
+      url | capture("https?://[^/]+/gh/(?<org>[^/]+)/(?<repo>[^/]+)/")
+      | "github/\(.org)/\(.repo)";
+
+    [.[] | .commits.nodes[0].commit.statusCheckRollup.contexts.nodes |= (
+      if . == null then null
+      else [.[] |
+        if .__typename == "CheckRun" then
+          { name, status, conclusion,
+            circleci_slug: (try cci_slug(.detailsUrl) catch null) }
+        elif .__typename == "StatusContext" then
+          { context, state,
+            circleci_slug: (try cci_slug(.targetUrl) catch null) }
+        else . end
+      ]
+      end
+    )]
+  '
+  exit 0
+fi
+
+# Build display structures
+declare -A repos
+pr_count=0
+
+while IFS= read -r line; do
+  repo=$(printf '%s\n' "$line" | jq -r '.repository.nameWithOwner')
+  number=$(printf '%s\n' "$line" | jq -r '.number')
+  title=$(printf '%s\n' "$line" | jq -r '.title')
+  url=$(printf '%s\n' "$line" | jq -r '.url')
+  head=$(printf '%s\n' "$line" | jq -r '.headRefName')
+  base=$(printf '%s\n' "$line" | jq -r '.baseRefName')
+  author=$(printf '%s\n' "$line" | jq -r '.author.login')
+
+  # Extract hostname from URL
+  hostname=$(printf '%s\n' "$url" | sed -E 's|https?://([^/]+)/.*|\1|')
+
+  # Use hostname+repo as key to separate by host
+  key="$hostname|$repo"
+  if [ -z "${repos[$key]:-}" ]; then
+    repos[$key]=""
+  fi
+
+  # Build failing CI lines
+  failing_ci=$(printf '%s\n' "$line" | jq -r '
+    (.commits.nodes[0].commit.statusCheckRollup.contexts.nodes // [])
+    | .[]
+    | if .__typename == "CheckRun" then
+        select(.conclusion == "FAILURE" or .conclusion == "TIMED_OUT" or .conclusion == "CANCELLED")
+        | "           [FAIL] \(.name)\n                  \(.detailsUrl)"
+      elif .__typename == "StatusContext" then
+        select(.state == "FAILURE" or .state == "ERROR")
+        | "           [FAIL] \(.context)\n                  \(.targetUrl)"
+      else empty
+      end
+  ')
+
+  pr_block=$(printf '  #%-4d %s (by %s)\n           %s → %s\n           %s' \
+    "$number" "$title" "$author" "$head" "$base" "$url")
+
+  if [ -n "$failing_ci" ]; then
+    pr_block=$(printf '%s\n%s' "$pr_block" "$failing_ci")
+  fi
+
+  if [ -n "${repos[$key]}" ]; then
+    repos[$key]+=$'\n'
+  fi
+  repos[$key]+="$pr_block"
+  pr_count=$((pr_count + 1))
+done < <(printf '%s\n' "$prs" | jq -c '.[]')
+
+# Check if we have any PRs
+if [ "$pr_count" -eq 0 ]; then
+  printf "No PRs requesting your review found.\n"
+  exit 0
+fi
+
+# Display organized output
+printf "Pull Requests Requesting Your Review\n"
+printf "====================================\n\n"
+
+for key in $(printf '%s\n' "${!repos[@]}" | sort); do
+  hostname=$(printf '%s\n' "$key" | cut -d'|' -f1)
+  repo=$(printf '%s\n' "$key" | cut -d'|' -f2)
+  printf "\n%s (%s)\n" "$repo" "$hostname"
+  printf "%s\n" "$(printf '%0.s-' $(seq 1 $((${#repo} + ${#hostname} + 3))))"
+  printf "%s\n" "${repos[$key]}"
+done
