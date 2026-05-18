@@ -33,7 +33,7 @@ alias l='ls -CF'
 #   sleep 10; alert
 alias alert='notify-send --urgency=low -i "$([ $? = 0 ] && echo terminal || echo error)" "$(history|tail -n1|sed -e '\''s/^\s*[0-9]\+\s*//;s/[;&|]\s*alert$//'\'')"'
 
-alias make="make -j"
+alias make="make -j 8"
 alias bush="rg --files | tree --fromfile"
 alias mv="omnimv"
 alias av='source .venv/bin/activate || source venv/bin/activate'
@@ -202,10 +202,21 @@ api_curl() {
     "${args[@]}"
 }
 
+# Wrapper script that prints dots to keep a process' log alive
+keepalive() {
+    while sleep 30; do printf '.'; done &
+    local pid=$!
+    "$@"
+    local ret=$!
+    kill "$pid" 2>/dev/null
+    return "$ret"
+}
+
 # Source atlassian helpers — works regardless of where mybashrc.sh is sourced from
 # ${BASH_SOURCE%/*} expands to the directory containing this script
-if [[ -f "${BASH_SOURCE%/*}/atlassian_helpers_rc.sh" ]]; then
-  source "${BASH_SOURCE%/*}/atlassian_helpers_rc.sh"
+NEEDS_SOURCE=${BASH_SOURCE%/*}/atlassian_helpers_rc.sh
+if [[ -f "$NEEDS_SOURCE" ]]; then
+  source "$NEEDS_SOURCE"
 else
-  printf 'Warning: atlassian_helpers_rc.sh not found at %s\n' "${BASH_SOURCE%/*}/atlassian_helpers_rc.sh" >&2
+  printf 'Warning: atlassian_helpers_rc.sh not found at %s\n' "$NEEDS_SOURCE" >&2
 fi
