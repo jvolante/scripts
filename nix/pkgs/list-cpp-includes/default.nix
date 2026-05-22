@@ -2,7 +2,7 @@
 makeShellScript {
   name = "list-cpp-includes";
   src  = self + "/list_cpp_includes.sh";
-  runtimeDeps = [ bash coreutils findutils ripgrep gcc clang ];
+  propagatedBuildInputs = [ bash coreutils findutils ripgrep gcc clang ];
   meta = with lib; {
     description = "A script to list unique #include paths for C++ source and header files";
     license = licenses.gpl3;

@@ -34,6 +34,7 @@
 { moduleName
 , src
 , profileD ? false
+, propagatedBuildInputs ? []
 , meta ? {}
 }:
 
@@ -50,7 +51,7 @@ let
     source "@shellinit_rc@"
   '';
 in
-runCommand "${moduleName}-shellinit-module" { inherit meta; } (
+runCommand "${moduleName}-shellinit-module" { inherit meta propagatedBuildInputs; } (
   ''
     install -Dm644 ${src} $out/share/shellinit/${moduleName}.sh
   ''

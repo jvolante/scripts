@@ -1,5 +1,4 @@
 # shellinit:contexts=interactive,login
-# shellinit:requires=api-curl,jira,confluence,cci
 export PROMPT_COMMAND='history -a'
 
 if [ -f "${XDG_CONFIG_DIR:-$HOME/.config}/opencode/bash_env.sh" ]; then
@@ -36,12 +35,9 @@ alias l='ls -CF'
 alias alert='notify-send --urgency=low -i "$([ $? = 0 ] && echo terminal || echo error)" "$(history|tail -n1|sed -e '\''s/^\s*[0-9]\+\s*//;s/[;&|]\s*alert$//'\'')"'
 
 alias make="make -j 8"
-alias bush="rg --files | tree --fromfile"
-alias mv="omnimv"
-alias cp='cp --reflink=auto'
+alias memhog='ps -eo user,pid,cmd,%mem,rss --sort=-rss | awk '\''NR==1{print $0; next} {printf "%-15s %-10s %-30s %5s %10s\n", $1, $2, $3, $4, $5/1024 " MB"}'\'' | head -n 11'
 alias av='source .venv/bin/activate || source venv/bin/activate'
 alias e='$EDITOR'
-alias memhog='ps -eo user,pid,cmd,%mem,rss --sort=-rss | awk '\''NR==1{print $0; next} {printf "%-15s %-10s %-30s %5s %10s\n", $1, $2, $3, $4, $5/1024 " MB"}'\'' | head -n 11'
 
 # enable color support of ls and also add handy aliases
 if [ -x /usr/bin/dircolors ]; then

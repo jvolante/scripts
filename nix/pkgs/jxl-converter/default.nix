@@ -2,7 +2,7 @@
 makeShellScript {
   name = "jxl-converter";
   src  = self + "/jxl_converter.sh";
-  runtimeDeps = [ bash coreutils findutils gnugrep libjxl ];
+  propagatedBuildInputs = [ bash coreutils findutils gnugrep libjxl ];
   meta = with lib; {
     description = "A script to convert images to JXL format";
     license = licenses.gpl3;

@@ -2,7 +2,7 @@
 makeShellScript {
   name = "yamldiff";
   src  = self + "/yamldiff";
-  runtimeDeps = [ bash coreutils yq diffutils ];
+  propagatedBuildInputs = [ bash coreutils yq diffutils ];
   meta = with lib; {
     description = "A script to diff two YAML files after sorting their keys";
     license = licenses.gpl3;

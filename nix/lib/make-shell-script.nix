@@ -9,7 +9,7 @@
 # Arguments:
 #   name        — derivation and binary name (kebab-case)
 #   src         — path to the source script file (e.g. self + "/my-script")
-#   runtimeDeps — list of Nix packages to merge and inject into PATH
+#   propagatedBuildInputs — list of Nix packages to merge and inject into PATH
 #   meta        — attrset passed through to meta (description, license, …)
 #
 # Usage in a package default.nix:
@@ -18,7 +18,7 @@
 #   makeShellScript {
 #     name = "my-tool";
 #     src  = self + "/my-tool";
-#     runtimeDeps = [ bash curl jq ];
+#     propagatedBuildInputs = [ bash curl jq ];
 #     meta = with lib; {
 #       description = "Does the thing";
 #       license = licenses.gpl3;
@@ -29,7 +29,7 @@
 
 { name
 , src
-, runtimeDeps ? []
+, propagatedBuildInputs ? []
 , meta ? {}
 }:
 
@@ -40,7 +40,7 @@ let
 in
 symlinkJoin {
   inherit name meta;
-  paths = [ patched ] ++ runtimeDeps;
+  paths = [ patched ] ++ propagatedBuildInputs;
   buildInputs = [ makeWrapper ];
   postBuild = "wrapProgram $out/bin/${name} --prefix PATH : $out/bin";
 }

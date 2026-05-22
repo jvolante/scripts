@@ -2,7 +2,7 @@
 makeShellScript {
   name = "replace-in-files";
   src  = self + "/replace-in-files";
-  runtimeDeps = [ bash coreutils ripgrep sd ];
+  propagatedBuildInputs = [ bash coreutils ripgrep sd ];
   meta = with lib; {
     description = "Regex find-and-replace across a directory tree using ripgrep for discovery and sd (Rust regex) for substitution";
     license = licenses.gpl3;

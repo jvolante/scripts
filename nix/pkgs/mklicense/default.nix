@@ -2,7 +2,7 @@
 makeShellScript {
   name = "mklicense";
   src  = self + "/mklicense";
-  runtimeDeps = [ bash coreutils curl gnused ];
+  propagatedBuildInputs = [ bash coreutils curl gnused ];
   meta = with lib; {
     description = "A script to create a license file";
     license = licenses.gpl3;

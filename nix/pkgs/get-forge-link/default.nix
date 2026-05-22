@@ -2,7 +2,7 @@
 makeShellScript {
   name = "get-forge-link";
   src  = self + "/get_forge_link";
-  runtimeDeps = [ git gnugrep gnused coreutils bash ];
+  propagatedBuildInputs = [ git gnugrep gnused coreutils bash ];
   meta = with lib; {
     description = "A script to get the forge link for a git repository";
     license = licenses.gpl3;
