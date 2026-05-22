@@ -108,10 +108,3 @@ mpv-multi() {
 
     eval $cmd
 }
-
-# ---------------------------------------------------------------------------
-# shellinit handles sourcing api-curl, jira, confluence, cci in dependency order.
-# This eval is only needed when mybashrc.sh is sourced directly (not via shellinit).
-if [[ -z "${_SHELLINIT_LOADED:-}" ]] && command -v shellinit > /dev/null 2>&1; then
-  eval "$(shellinit interactive login)"
-fi
