@@ -179,9 +179,6 @@ if [ "$pr_count" -eq 0 ]; then
 fi
 
 # Display organized output
-printf "Your Open Pull Requests\n"
-printf "=======================\n\n"
-
 for key in $(printf '%s\n' "${!repos[@]}" | sort); do
   hostname=$(printf '%s\n' "$key" | cut -d'|' -f1)
   repo=$(printf '%s\n' "$key" | cut -d'|' -f2)

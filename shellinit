@@ -1,0 +1,327 @@
+#!/usr/bin/env bash
+# shellinit — context-aware shell module loader
+#
+# Scans directories in SHELLINIT_PATH (colon-separated) for *.sh modules,
+# resolves declared dependencies, filters by context, checks required tools,
+# and emits `source` lines to stdout for eval in the calling shell.
+#
+# Usage:
+#   eval "$(shellinit <context> [context...])"
+#   shellinit --list [context...]
+#   shellinit --dry-run <context> [context...]
+#
+# Contexts: any  interactive  login  noninteractive  (or custom tags)
+#   - 'any' always matches regardless of requested contexts
+#   - 'interactive' also matches when 'login' is requested (additive)
+#   - Multiple requested contexts are unioned: a module matching any one is included
+#
+# Module header format (parsed from comments at the top of each .sh file):
+#   # shellinit:contexts=any
+#   # shellinit:requires=api-curl,other-module
+#   # shellinit:tools=curl,jq,python3
+#
+# Environment:
+#   SHELLINIT_PATH  Colon-separated list of directories to scan for modules.
+#                   Required — shellinit exits with an error if unset or empty.
+#
+# Idempotency:
+#   Loaded module names are tracked in $_SHELLINIT_LOADED (colon-separated).
+#   Re-running eval "$(shellinit ...)" in the same shell skips already-loaded modules.
+
+set -euo pipefail
+
+# ---------------------------------------------------------------------------
+# Constants
+# ---------------------------------------------------------------------------
+readonly _SI_VERSION="1.0.0"
+
+# ---------------------------------------------------------------------------
+# Argument parsing
+# ---------------------------------------------------------------------------
+_si_mode="source"   # source | list | dry-run
+_si_contexts=()
+
+for _arg in "$@"; do
+  case "$_arg" in
+    --list)     _si_mode="list" ;;
+    --dry-run)  _si_mode="dry-run" ;;
+    --version)  printf 'shellinit %s\n' "$_SI_VERSION"; exit 0 ;;
+    --help)
+      printf 'Usage: eval "$(shellinit <context> [context...])"\n'
+      printf '       shellinit --list [context...]\n'
+      printf '       shellinit --dry-run <context> [context...]\n'
+      printf '\nContexts: any interactive login noninteractive (or custom)\n'
+      printf '\nRequires SHELLINIT_PATH to be set (colon-separated directories).\n'
+      exit 0
+      ;;
+    --*)
+      printf 'shellinit: unknown option "%s"\n' "$_arg" >&2
+      exit 1
+      ;;
+    *)
+      _si_contexts+=("$_arg")
+      ;;
+  esac
+done
+
+# ---------------------------------------------------------------------------
+# Validate SHELLINIT_PATH
+# ---------------------------------------------------------------------------
+if [[ -z "${SHELLINIT_PATH:-}" ]]; then
+  printf 'shellinit: SHELLINIT_PATH is not set — no modules will be loaded\n' >&2
+  printf 'shellinit: set SHELLINIT_PATH to a colon-separated list of module directories\n' >&2
+  exit 1
+fi
+
+# ---------------------------------------------------------------------------
+# Context matching
+# ---------------------------------------------------------------------------
+# Returns 0 if module_contexts matches any of the requested contexts.
+# Rules:
+#   - 'any' in module contexts always matches
+#   - 'interactive' in module contexts matches if 'interactive' OR 'login' requested
+#   - Otherwise, exact match between module context and any requested context
+_si_context_matches() {
+  local module_ctx_str="$1"   # comma-separated contexts from module header
+  local -a module_ctxs
+  IFS=',' read -ra module_ctxs <<< "$module_ctx_str"
+
+  for mctx in "${module_ctxs[@]}"; do
+    mctx="${mctx// /}"  # strip spaces
+    [[ "$mctx" == "any" ]] && return 0
+    for rctx in "${_si_contexts[@]}"; do
+      [[ "$mctx" == "$rctx" ]] && return 0
+      # interactive also applies to login sessions
+      [[ "$mctx" == "interactive" && "$rctx" == "login" ]] && return 0
+    done
+  done
+  return 1
+}
+
+# ---------------------------------------------------------------------------
+# Module discovery and header parsing
+# ---------------------------------------------------------------------------
+# Associative arrays keyed by module name:
+declare -A _si_path        # module-name → absolute file path
+declare -A _si_contexts_map  # module-name → contexts string
+declare -A _si_requires    # module-name → requires string
+declare -A _si_tools       # module-name → tools string
+
+# Scan SHELLINIT_PATH — first occurrence of a name wins
+IFS=':' read -ra _si_dirs <<< "$SHELLINIT_PATH"
+for _si_dir in "${_si_dirs[@]}"; do
+  [[ -d "$_si_dir" ]] || continue
+  for _si_file in "$_si_dir"/*.sh; do
+    [[ -f "$_si_file" ]] || continue
+    _si_name="${_si_file##*/}"   # basename
+    _si_name="${_si_name%.sh}"   # strip .sh
+    # First-found wins — skip if already registered
+    [[ -v _si_path["$_si_name"] ]] && continue
+
+    _si_path["$_si_name"]="$_si_file"
+    _si_contexts_map["$_si_name"]="any"  # default
+    _si_requires["$_si_name"]=""
+    _si_tools["$_si_name"]=""
+
+    # Parse header lines — only read until first non-comment, non-empty line
+    while IFS= read -r _line; do
+      # Stop at first line that isn't a comment or blank
+      [[ "$_line" =~ ^[[:space:]]*# || -z "$_line" ]] || break
+      # Only parse shellinit: prefixed headers
+      [[ "$_line" =~ ^[[:space:]]*#[[:space:]]*shellinit:(.+)$ ]] || continue
+      _kv="${BASH_REMATCH[1]}"
+      _key="${_kv%%=*}"
+      _val="${_kv#*=}"
+      case "$_key" in
+        contexts) _si_contexts_map["$_si_name"]="$_val" ;;
+        requires) _si_requires["$_si_name"]="$_val" ;;
+        tools)    _si_tools["$_si_name"]="$_val" ;;
+      esac
+    done < "$_si_file"
+  done
+done
+
+# ---------------------------------------------------------------------------
+# Filter by context (build candidate set)
+# ---------------------------------------------------------------------------
+declare -A _si_candidates  # module-name → 1 if passes context filter
+
+if [[ ${#_si_contexts[@]} -eq 0 ]]; then
+  # No context requested — include everything (useful for --list with no args)
+  for _name in "${!_si_path[@]}"; do
+    _si_candidates["$_name"]=1
+  done
+else
+  for _name in "${!_si_path[@]}"; do
+    if _si_context_matches "${_si_contexts_map[$_name]}"; then
+      _si_candidates["$_name"]=1
+    fi
+  done
+fi
+
+# ---------------------------------------------------------------------------
+# Expand requires= — pull in dependencies even if they don't match context
+# (a dep must be available regardless of its own context tag)
+# ---------------------------------------------------------------------------
+_si_changed=1
+while [[ "$_si_changed" -eq 1 ]]; do
+  _si_changed=0
+  for _name in "${!_si_candidates[@]}"; do
+    [[ -z "${_si_requires[$_name]}" ]] && continue
+    IFS=',' read -ra _deps <<< "${_si_requires[$_name]}"
+    for _dep in "${_deps[@]}"; do
+      _dep="${_dep// /}"
+      [[ -z "$_dep" ]] && continue
+      if [[ ! -v _si_candidates["$_dep"] ]]; then
+        if [[ -v _si_path["$_dep"] ]]; then
+          _si_candidates["$_dep"]=1
+          _si_changed=1
+        else
+          printf 'shellinit: module "%s" requires "%s" which is not found in SHELLINIT_PATH\n' \
+            "$_name" "$_dep" >&2
+        fi
+      fi
+    done
+  done
+done
+
+# ---------------------------------------------------------------------------
+# Tool availability check — remove candidates with missing tools
+# ---------------------------------------------------------------------------
+declare -A _si_skip  # module-name → 1 if should be skipped
+
+for _name in "${!_si_candidates[@]}"; do
+  [[ -z "${_si_tools[$_name]}" ]] && continue
+  IFS=',' read -ra _tool_list <<< "${_si_tools[$_name]}"
+  for _tool in "${_tool_list[@]}"; do
+    _tool="${_tool// /}"
+    [[ -z "$_tool" ]] && continue
+    if ! command -v "$_tool" > /dev/null 2>&1; then
+      printf 'shellinit: skipping module "%s" — required tool "%s" not found in PATH\n' \
+        "$_name" "$_tool" >&2
+      _si_skip["$_name"]=1
+      break
+    fi
+  done
+done
+
+# ---------------------------------------------------------------------------
+# Topological sort (iterative Kahn's algorithm)
+# ---------------------------------------------------------------------------
+# Build in-degree counts and adjacency list over the candidate set only
+declare -A _si_indegree   # module-name → int
+declare -A _si_dependents # module-name → space-separated list of modules that depend on it
+
+for _name in "${!_si_candidates[@]}"; do
+  [[ -v _si_skip["$_name"] ]] && continue
+  _si_indegree["$_name"]=0
+done
+
+for _name in "${!_si_candidates[@]}"; do
+  [[ -v _si_skip["$_name"] ]] && continue
+  [[ -z "${_si_requires[$_name]}" ]] && continue
+  IFS=',' read -ra _deps <<< "${_si_requires[$_name]}"
+  for _dep in "${_deps[@]}"; do
+    _dep="${_dep// /}"
+    [[ -z "$_dep" ]] && continue
+    # Skip if dep was itself skipped
+    [[ -v _si_skip["$_dep"] ]] && continue
+    [[ -v _si_candidates["$_dep"] ]] || continue
+    _si_indegree["$_name"]=$(( ${_si_indegree["$_name"]:-0} + 1 ))
+    _si_dependents["$_dep"]+=" $_name"
+  done
+done
+
+# Seed queue with zero-indegree modules (sorted by name for determinism)
+_si_queue=()
+for _name in $(printf '%s\n' "${!_si_indegree[@]}" | sort); do
+  [[ "${_si_indegree[$_name]}" -eq 0 ]] && _si_queue+=("$_name")
+done
+
+_si_sorted=()
+while [[ ${#_si_queue[@]} -gt 0 ]]; do
+  _cur="${_si_queue[0]}"
+  _si_queue=("${_si_queue[@]:1}")
+  _si_sorted+=("$_cur")
+
+  for _dependent in ${_si_dependents["$_cur"]:-}; do
+    _si_indegree["$_dependent"]=$(( _si_indegree["$_dependent"] - 1 ))
+    if [[ "${_si_indegree[$_dependent]}" -eq 0 ]]; then
+      # Insert in sorted position for determinism
+      _si_queue+=("$_dependent")
+      _si_queue=($(printf '%s\n' "${_si_queue[@]}" | sort))
+    fi
+  done
+done
+
+# Detect cycles — any module with indegree > 0 is in a cycle
+for _name in "${!_si_indegree[@]}"; do
+  if [[ "${_si_indegree[$_name]}" -gt 0 ]]; then
+    printf 'shellinit: dependency cycle detected involving module "%s" — skipping\n' \
+      "$_name" >&2
+    _si_skip["$_name"]=1
+  fi
+done
+
+# ---------------------------------------------------------------------------
+# Already-loaded filter (idempotency via $_SHELLINIT_LOADED)
+# ---------------------------------------------------------------------------
+declare -A _si_already_loaded
+if [[ -n "${_SHELLINIT_LOADED:-}" ]]; then
+  IFS=':' read -ra _loaded_list <<< "$_SHELLINIT_LOADED"
+  for _loaded in "${_loaded_list[@]}"; do
+    _si_already_loaded["$_loaded"]=1
+  done
+fi
+
+# ---------------------------------------------------------------------------
+# Output
+# ---------------------------------------------------------------------------
+case "$_si_mode" in
+
+  list)
+    # Print a table of all discovered modules with their metadata
+    printf '%-30s %-20s %-25s %-15s %s\n' \
+      "MODULE" "CONTEXTS" "REQUIRES" "TOOLS" "STATUS"
+    printf '%s\n' "$(printf '%.0s-' {1..100})"
+    for _name in $(printf '%s\n' "${!_si_path[@]}" | sort); do
+      _status="available"
+      [[ -v _si_skip["$_name"] ]]         && _status="skipped(tools)"
+      [[ -v _si_already_loaded["$_name"] ]] && _status="loaded"
+      [[ ! -v _si_candidates["$_name"] ]] && _status="context-filtered"
+      printf '%-30s %-20s %-25s %-15s %s\n' \
+        "$_name" \
+        "${_si_contexts_map[$_name]:-any}" \
+        "${_si_requires[$_name]:--}" \
+        "${_si_tools[$_name]:--}" \
+        "$_status"
+    done
+    ;;
+
+  dry-run)
+    printf '# shellinit dry-run — would source in this order:\n'
+    _si_new_loaded=("${!_si_already_loaded[@]}")
+    for _name in "${_si_sorted[@]}"; do
+      [[ -v _si_skip["$_name"] ]]           && continue
+      [[ -v _si_already_loaded["$_name"] ]] && { printf '# skip (loaded): %s\n' "$_name"; continue; }
+      printf 'source %s\n' "${_si_path[$_name]}"
+      _si_new_loaded+=("$_name")
+    done
+    ;;
+
+  source)
+    # Emit source lines + update _SHELLINIT_LOADED for the calling shell
+    _si_new_loaded=("${!_si_already_loaded[@]}")
+    for _name in "${_si_sorted[@]}"; do
+      [[ -v _si_skip["$_name"] ]]           && continue
+      [[ -v _si_already_loaded["$_name"] ]] && continue
+      printf 'source %s\n' "${_si_path[$_name]}"
+      _si_new_loaded+=("$_name")
+    done
+    # Export updated loaded set back to calling shell
+    if [[ ${#_si_new_loaded[@]} -gt 0 ]]; then
+      printf 'export _SHELLINIT_LOADED="%s"\n' \
+        "$(printf '%s\n' "${_si_new_loaded[@]}" | sort | tr '\n' ':' | sed 's/:$//')"
+    fi
+    ;;
+esac

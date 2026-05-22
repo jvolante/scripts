@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+# Collect all hosts configured in gh
+mapfile -t hosts < <(gh auth status 2>&1 | awk '/^[^ ]/{host=$1} /Active account: true/{print host}' || true)
+
+if [ "${#hosts[@]}" -eq 0 ]; then
+  printf "No authenticated gh hosts found.\n"
+  exit 1
+fi
+
+for host in "${hosts[@]}"; do
+  gh pr list --hostname "$host" --state open --json number,mergeable --query '.[] | select(.mergeable == true) | .number' | xargs -I {} gh pr merge {} --squash --delete-branch
+done

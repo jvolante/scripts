@@ -1,0 +1,17 @@
+[Unit]
+Description=Hourly NAS Backup Timer
+Documentation=file://%h/jvscripts/systemd/services/README.md
+Requires=nas-backup.service
+
+[Timer]
+# Run every hour
+OnCalendar=hourly
+
+# Run 5 minutes after boot if missed
+OnBootSec=5min
+
+# If a scheduled run is missed (e.g., system was off), run it when possible
+Persistent=true
+
+[Install]
+WantedBy=timers.target

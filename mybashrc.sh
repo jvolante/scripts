@@ -1,3 +1,5 @@
+# shellinit:contexts=interactive,login
+# shellinit:requires=api-curl,jira,confluence,cci
 export PROMPT_COMMAND='history -a'
 
 if [ -f "${XDG_CONFIG_DIR:-$HOME/.config}/opencode/bash_env.sh" ]; then
@@ -36,8 +38,8 @@ alias alert='notify-send --urgency=low -i "$([ $? = 0 ] && echo terminal || echo
 alias make="make -j 8"
 alias bush="rg --files | tree --fromfile"
 alias mv="omnimv"
-alias av='source .venv/bin/activate || source venv/bin/activate'
 alias cp='cp --reflink=auto'
+alias av='source .venv/bin/activate || source venv/bin/activate'
 alias e='$EDITOR'
 alias memhog='ps -eo user,pid,cmd,%mem,rss --sort=-rss | awk '\''NR==1{print $0; next} {printf "%-15s %-10s %-30s %5s %10s\n", $1, $2, $3, $4, $5/1024 " MB"}'\'' | head -n 11'
 
@@ -53,66 +55,18 @@ if [ -x /usr/bin/dircolors ]; then
   alias egrep='egrep --color=auto'
 fi
 
-# Function to parse a flake file and print entries in the format:
-# "Original flake URL#Flake attribute"
-list_profile_install_targets() {
-  # Use the first argument as input file; if not given, default to standard input.
-  local input="${1:-/dev/stdin}"
-
-  # Use AWK to process the file block by block.
-  awk '
-    BEGIN {
-      # Initialize variables to hold the attribute and URL.
-      attr = "";
-      url  = "";
-    }
-    # When an "Index:" line is encountered, it marks the start of a new block.
-    /^Index:/ {
-      # If both attribute and URL were captured in the previous block, print them.
-      if (attr != "" && url != "")
-        print url "#" attr;
-      # Reset the variables for the new block.
-      attr = "";
-      url  = "";
-    }
-    # Extract the "Flake attribute:" value by removing the label.
-    /Flake attribute:/ {
-      sub(/^[ \t]*Flake attribute:[ \t]+/, "", $0);
-      attr = $0;
-    }
-    # Extract the "Original flake URL:" value by removing the label.
-    /Original flake URL:/ {
-      sub(/^[ \t]*Original flake URL:[ \t]+/, "", $0);
-      url = $0;
-    }
-    END {
-      # Process the final block if it contains both values.
-      if (attr != "" && url != "")
-        print url "#" attr;
-    }
-  ' "$input"
-}
-
 mkcd() {
-  mkdir -p "$1" && cd "$1"
-}
-
-ncmp_cpp() {
-  nix develop --command bash -c "cmake -Bbuild . && make -Cbuild -j" && nix develop
+  mkdir -p "$1" && cd "$1" || return 1
 }
 
 codecs() {
   ffmpeg -encoders 2>&1 | grep -E "(h264|h265|vp8|vp9|av1|hevc)"
 }
 
-check-flake-input-version() {
-  jq ".nodes.\"$1\".locked.rev" flake.lock
-}
-
 clonecd() {
   local repo_url repo_dir
   if (($# > 1)); then
-    git clone "$1" "$2" && cd "$2"
+    git clone "$1" "$2" && cd "$2" || return 1
   elif (($# == 1)); then
     repo_url="$1"
     if [[ "$repo_url" =~ \.git$ ]]; then
@@ -120,7 +74,7 @@ clonecd() {
     else
       repo_dir=$(basename "$repo_url")
     fi
-    git clone "$repo_url" && cd "$repo_dir"
+    git clone "$repo_url" && cd "$repo_dir" || return 1
   else
     printf 'Usage: clonecd <url> [directory]\n' >&2
     return 1
@@ -160,63 +114,8 @@ mpv-multi() {
 }
 
 # ---------------------------------------------------------------------------
-# Shared API curl helper
-# Usage: api_curl <base_url> <auth_header> [curl flags...] <endpoint> [curl flags...]
-# Injects the base URL in front of the first non-flag, non-value argument.
-# Handles two-part flags (-X POST, -d '...', -H '...', --data-urlencode '...').
-# auth_header may be empty — if so, no Authorization header is sent.
-# ---------------------------------------------------------------------------
-api_curl() {
-  local base_url="$1"
-  local auth_header="$2"
-  shift 2
-
-  local args=()
-  local endpoint_set=0
-  local skip_next=0
-  for arg in "$@"; do
-    if [[ $skip_next -eq 1 ]]; then
-      args+=("$arg")
-      skip_next=0
-    elif [[ "$arg" == -X || "$arg" == -d || "$arg" == --data || "$arg" == --data-urlencode || "$arg" == -H ]]; then
-      args+=("$arg")
-      skip_next=1
-    elif [[ "$arg" == -* ]]; then
-      args+=("$arg")
-    elif [[ $endpoint_set -eq 0 ]]; then
-      args+=("${base_url}/${arg}")
-      endpoint_set=1
-    else
-      args+=("$arg")
-    fi
-  done
-  if [[ $endpoint_set -eq 0 ]]; then
-    printf 'api_curl: no endpoint provided\n' >&2
-    return 1
-  fi
-  local auth_args=()
-  [[ -n "$auth_header" ]] && auth_args=(-H "Authorization: ${auth_header}")
-  curl -s \
-    "${auth_args[@]}" \
-    -H "Content-Type: application/json" \
-    "${args[@]}"
-}
-
-# Wrapper script that prints dots to keep a process' log alive
-keepalive() {
-    while sleep 30; do printf '.'; done &
-    local pid=$!
-    "$@"
-    local ret=$!
-    kill "$pid" 2>/dev/null
-    return "$ret"
-}
-
-# Source atlassian helpers — works regardless of where mybashrc.sh is sourced from
-# ${BASH_SOURCE%/*} expands to the directory containing this script
-NEEDS_SOURCE=${BASH_SOURCE%/*}/atlassian_helpers_rc.sh
-if [[ -f "$NEEDS_SOURCE" ]]; then
-  source "$NEEDS_SOURCE"
-else
-  printf 'Warning: atlassian_helpers_rc.sh not found at %s\n' "$NEEDS_SOURCE" >&2
+# shellinit handles sourcing api-curl, jira, confluence, cci in dependency order.
+# This eval is only needed when mybashrc.sh is sourced directly (not via shellinit).
+if [[ -z "${_SHELLINIT_LOADED:-}" ]] && command -v shellinit > /dev/null 2>&1; then
+  eval "$(shellinit interactive login)"
 fi

@@ -1,0 +1,87 @@
+#!/usr/bin/env bash
+# Find a header file in include paths extracted from compile_commands.json
+#
+# Usage: search-header [-c <compile_commands.json>] <header_name>
+
+set -euo pipefail
+
+compile_commands="./compile_commands.json"
+header_name=""
+
+# Parse arguments
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        -C)
+            compile_commands="$2"
+            shift 2
+            ;;
+        -h|--help)
+            printf "search-header - Find headers using compile_commands.json include paths\n\n"
+            printf "Usage: search-header [-C <compile_commands.json>] <header_name>\n\n"
+            printf "Options:\n"
+            printf "  -C <path>    Path to compile_commands.json (default: ./compile_commands.json)\n"
+            printf "  -h, --help   Show this help message\n\n"
+            printf "Examples:\n"
+            printf "  search-header vector\n"
+            printf "  search-header -C build/compile_commands.json stdio.h\n"
+            printf "  search-header nlohmann/json.hpp\n"
+            exit 0
+            ;;
+        -*)
+            printf "Error: Unknown option '%s'\n" "$1" >&2
+            exit 1
+            ;;
+        *)
+            if [[ -z "$header_name" ]]; then
+                header_name="$1"
+                shift
+            else
+                printf "Error: Multiple header names provided\n" >&2
+                exit 1
+            fi
+            ;;
+    esac
+done
+
+# Validate inputs
+if [[ -z "$header_name" ]]; then
+    printf "Error: Header name not provided\n" >&2
+    exit 1
+fi
+
+if [[ ! -f "$compile_commands" ]]; then
+    printf "Error: compile_commands.json not found at '%s'\n" "$compile_commands" >&2
+    exit 1
+fi
+
+# Extract unique include paths from compile_commands.json
+# Handles both -I and -isystem flags
+include_paths=$(jq -r '.[] | .command' "$compile_commands" | \
+    grep -oE '(^|\s)(-I|-isystem)([^ =]|=[^ ])[^ ]*' | \
+    sed -E 's/^[[:space:]]*(-I|-isystem)[[:space:]]*=?//; s/[[:space:]]*$//' | \
+    sort -u)
+
+if [[ -z "$include_paths" ]]; then
+    printf "Error: No include paths found in %s\n" "$compile_commands" >&2
+    exit 1
+fi
+
+# Search for the header in each include path
+found=0
+while IFS= read -r include_path; do
+    # Expand ~ and other path variables
+    expanded_path=$(eval echo "$include_path")
+
+    if [[ -d "$expanded_path" ]]; then
+        # Look for the header file
+        if [[ -f "$expanded_path/$header_name" ]]; then
+            printf "%s\n" "$expanded_path/$header_name"
+            found=1
+        fi
+    fi
+done <<< "$include_paths"
+
+if [[ $found -eq 0 ]]; then
+    printf "Header '%s' not found in any include path\n" "$header_name" >&2
+    exit 1
+fi
