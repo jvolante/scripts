@@ -1,7 +1,7 @@
 { lib, awk, jq, self, makeShellInitModule }:
 makeShellInitModule {
   moduleName = "nix-helpers";
-  src        = self + "/nix_helpers_rc.sh";
+  src        = self + "/shellinit_rc/nix_helpers_rc.sh";
   profileD   = true;
   propagatedBuildInputs = [ awk jq ];
   meta = with lib; {

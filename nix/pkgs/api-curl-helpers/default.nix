@@ -1,7 +1,7 @@
 { lib, curl, self, makeShellInitModule }:
 makeShellInitModule {
   moduleName = "api-curl";
-  src        = self + "/api_curl_helpers_rc.sh";
+  src        = self + "/shellinit_rc/api_curl_helpers_rc.sh";
   profileD   = true;
   propagatedBuildInputs = [ curl ];
   meta = with lib; {

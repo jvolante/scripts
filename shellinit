@@ -264,14 +264,26 @@ for _name in "${!_si_indegree[@]}"; do
 done
 
 # ---------------------------------------------------------------------------
-# Already-loaded filter (idempotency via $_SHELLINIT_LOADED)
+# Already-loaded filter (idempotency via $_SHELLINIT_LOADED_$$)
+#
+# The loaded-set variable is keyed by the calling shell's PID so that
+# subshells (e.g. command substitutions where BASH_ENV fires) cannot
+# pollute the parent shell's loaded state.  shellinit itself cannot know
+# the calling shell's PID, so it emits the literal token '$$' in the
+# variable name; bash expands '$$' to the calling shell's PID at eval time.
+#
+# To read the existing loaded set, shellinit looks for the env var
+# _SHELLINIT_LOADED_<pid> passed in via SHELLINIT_CALLER_PID.
 # ---------------------------------------------------------------------------
 declare -A _si_already_loaded
-if [[ -n "${_SHELLINIT_LOADED:-}" ]]; then
-  IFS=':' read -ra _loaded_list <<< "$_SHELLINIT_LOADED"
-  for _loaded in "${_loaded_list[@]}"; do
-    _si_already_loaded["$_loaded"]=1
-  done
+if [[ -n "${SHELLINIT_CALLER_PID:-}" ]]; then
+  _si_loaded_var="_SHELLINIT_LOADED_${SHELLINIT_CALLER_PID}"
+  if [[ -n "${!_si_loaded_var:-}" ]]; then
+    IFS=':' read -ra _loaded_list <<< "${!_si_loaded_var}"
+    for _loaded in "${_loaded_list[@]}"; do
+      _si_already_loaded["$_loaded"]=1
+    done
+  fi
 fi
 
 # ---------------------------------------------------------------------------
@@ -310,17 +322,21 @@ case "$_si_mode" in
     ;;
 
   source)
-    # Emit source lines + update _SHELLINIT_LOADED for the calling shell
+    # Emit source lines + update _SHELLINIT_LOADED_$$ for the calling shell.
+    # Each file is wrapped in a function call so that 'return' inside the
+    # sourced file (e.g. idempotency guards) does not exit the entire eval block.
+    # '$$' in the emitted variable name expands to the calling shell's PID at
+    # eval time, scoping the loaded set to that shell only.
     _si_new_loaded=("${!_si_already_loaded[@]}")
     for _name in "${_si_sorted[@]}"; do
       [[ -v _si_skip["$_name"] ]]           && continue
       [[ -v _si_already_loaded["$_name"] ]] && continue
-      printf 'source %s\n' "${_si_path[$_name]}"
+      printf '_si_load() { source %s; }; _si_load\n' "${_si_path[$_name]}"
       _si_new_loaded+=("$_name")
     done
-    # Export updated loaded set back to calling shell
+    # Update the PID-scoped loaded set in the calling shell.
     if [[ ${#_si_new_loaded[@]} -gt 0 ]]; then
-      printf 'export _SHELLINIT_LOADED="%s"\n' \
+      printf 'declare "_SHELLINIT_LOADED_$$=%s"\n' \
         "$(printf '%s\n' "${_si_new_loaded[@]}" | sort | tr '\n' ':' | sed 's/:$//')"
     fi
     ;;

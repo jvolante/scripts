@@ -21,7 +21,7 @@
 #   { lib, self, makeShellInitModule }:
 #   makeShellInitModule {
 #     moduleName = "api-curl";
-#     src        = self + "/api_curl_helpers_rc.sh";
+#     src        = self + "/shellinit_rc/api_curl_helpers_rc.sh";
 #     profileD   = true;   # optional — also install etc/profile.d/api-curl.sh
 #     meta = with lib; {
 #       description = "shellinit module providing api_curl and keepalive";

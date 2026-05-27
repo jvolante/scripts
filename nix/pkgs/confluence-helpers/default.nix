@@ -1,7 +1,7 @@
 { lib, curl, jq, self, makeShellInitModule, jvscripts }:
 makeShellInitModule {
   moduleName = "confluence";
-  src        = self + "/confluence_helpers_rc.sh";
+  src        = self + "/shellinit_rc/confluence_helpers_rc.sh";
   profileD   = true;
   propagatedBuildInputs = [ jvscripts.api-curl-helpers curl jq ];
   meta = with lib; {

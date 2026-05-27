@@ -1,7 +1,7 @@
 { lib, curl, jq, python3, self, makeShellInitModule, jvscripts }:
 makeShellInitModule {
   moduleName = "cci";
-  src        = self + "/cci_helpers_rc.sh";
+  src        = self + "/shellinit_rc/cci_helpers_rc.sh";
   profileD   = true;
   propagatedBuildInputs = [ jvscripts.api-curl-helpers curl jq python3 ];
   meta = with lib; {
