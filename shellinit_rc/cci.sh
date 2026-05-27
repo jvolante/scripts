@@ -100,39 +100,69 @@ cci-workflow() {
   jq -n --argjson meta "$meta" --argjson jobs "$jobs" '$meta + {jobs: $jobs}'
 }
 
+# Strip progress-indicator noise from CCI log output.
+# Simulates terminal CR-overwrite behaviour: for each line, keeps only the
+# final segment after the last bare \r (the state a terminal would display).
+# Works on any tool that uses \r to redraw progress (git, pip, npm, etc.).
+# Usage: cci-log-clean
+# Example: cci-log github/my-org/my-repo 3001 | cci-log-clean
+cci-log-clean() {
+  # Pass 1 (--across): normalise CRLF → LF so \r\n line endings are not
+  #         mistaken for progress overwrites in pass 2.
+  # Pass 2 (line-by-line): strip everything up to and including the last
+  #         bare \r on each line, leaving only the final overwrite state.
+  sd --across '\x0d\x0a' '\x0a' | sd '.*\x0d' ''
+}
+
 # Get build log output for a single job
-# Get build log output for a single job.
 # Falls back to fetching presigned output URLs from the v1.1 job detail when
 # the direct /output endpoint returns a non-JSON 404 (common on self-hosted CCI).
-# Usage: cci-log <project-slug> <build-num>
+# Progress-indicator noise is stripped by default (see cci-log-clean).
+# Usage: cci-log [--no-clean] <project-slug> <build-num>
 # Example: cci-log github/my-org/my-repo 3001
+#          cci-log --no-clean github/my-org/my-repo 3001
 cci-log() {
+  local clean=1
+  if [[ "${1:-}" == "--no-clean" ]]; then
+    clean=0
+    shift
+  fi
+
   if [[ $# -lt 2 ]]; then
-    printf 'Usage: cci-log <project-slug> <build-num>\n' >&2
+    printf 'Usage: cci-log [--no-clean] <project-slug> <build-num>\n' >&2
     return 1
   fi
   local slug="$1"
   local build_num="$2"
 
-  # Try the direct output endpoint first
-  local direct
-  direct=$(cci-curl "v1.1/project/${slug}/${build_num}/output" 2>/dev/null)
-  if echo "$direct" | jq -e '.[0].output' >/dev/null 2>&1; then
-    echo "$direct" | jq -r '.[] | .output[] | .message' 2>/dev/null
-    return
-  fi
+  _cci-log-raw() {
+    # Try the direct output endpoint first
+    local direct
+    direct=$(cci-curl "v1.1/project/${slug}/${build_num}/output" 2>/dev/null)
+    if echo "$direct" | jq -e '.[0].output' >/dev/null 2>&1; then
+      echo "$direct" | jq -r '.[] | .output[] | .message' 2>/dev/null
+      return
+    fi
 
-  # Fall back: extract presigned output_url values from the job detail and fetch each
-  local urls
-  urls=$(cci-curl "v1.1/project/${slug}/${build_num}" 2>/dev/null \
-    | jq -r '[.steps[]? | .actions[]? | select(.output_url != null) | .output_url] | .[]' 2>/dev/null)
-  if [[ -z "$urls" ]]; then
-    printf 'cci-log: no output available for build %s\n' "$build_num" >&2
-    return 1
+    # Fall back: extract presigned output_url values from the job detail and fetch each
+    local urls
+    urls=$(cci-curl "v1.1/project/${slug}/${build_num}" 2>/dev/null \
+      | jq -r '[.steps[]? | .actions[]? | select(.output_url != null) | .output_url] | .[]' 2>/dev/null)
+    if [[ -z "$urls" ]]; then
+      printf 'cci-log: no output available for build %s\n' "$build_num" >&2
+      return 1
+    fi
+    while IFS= read -r url; do
+      curl -s "$url" | jq -r '.[].message' 2>/dev/null
+    done <<< "$urls"
+  }
+
+  if [[ "$clean" -eq 1 ]]; then
+    _cci-log-raw | cci-log-clean
+  else
+    _cci-log-raw
   fi
-  while IFS= read -r url; do
-    curl -s "$url" | jq -r '.[].message' 2>/dev/null
-  done <<< "$urls"
+  unset -f _cci-log-raw
 }
 
 # Rerun a failed workflow from failed jobs
@@ -209,13 +239,22 @@ cci-slug() {
 
 # Fetch logs for the most recently failed job on the current branch (or a given slug+branch).
 # Infers the project slug and branch from git when not provided.
-# Usage: cci-failed-logs [project-slug [branch]]
+# Progress-indicator noise is stripped by default (see cci-log-clean).
+# Usage: cci-failed-logs [--no-clean] [project-slug [branch]]
+# Options:
+#   --no-clean  Disable stripping of progress-indicator noise from log output
 # Examples:
 #   cci-failed-logs
+#   cci-failed-logs --no-clean
 #   cci-failed-logs github/my-org/my-repo
 #   cci-failed-logs github/my-org/my-repo feature/my-branch
 cci-failed-logs() {
-  local slug branch
+  local slug branch clean=1
+
+  if [[ "${1:-}" == "--no-clean" ]]; then
+    clean=0
+    shift
+  fi
 
   if [[ $# -ge 1 ]]; then
     slug="$1"
@@ -249,7 +288,11 @@ cci-failed-logs() {
 
   printf 'Failed job : %s / %s  (build #%s)\n\n' "$workflow_name" "$job_name" "$build_num"
 
-  cci-log "$slug" "$build_num"
+  if [[ "$clean" -eq 1 ]]; then
+    cci-log "$slug" "$build_num"
+  else
+    cci-log --no-clean "$slug" "$build_num"
+  fi
 }
 
 # Wait for all CI jobs on the current branch's remote HEAD to finish, then print a summary.
@@ -258,12 +301,13 @@ cci-failed-logs() {
 # Only watches pipelines whose revision matches the current remote tracking SHA, so a
 # stale in-progress pipeline from a previous push is ignored.
 #
-# Usage: cci-wait-on-jobs [project-slug [branch]] [--interval <seconds>] [--timeout <seconds>] [--progress] [--no-logs]
+# Usage: cci-wait-on-jobs [project-slug [branch]] [--interval <seconds>] [--timeout <seconds>] [--progress] [--no-logs] [--no-clean]
 # Options:
 #   --interval <seconds>  Poll interval (default: 30)
 #   --timeout  <seconds>  Give up after this many seconds (default: 36000)
 #   --progress            Print a live job-status table on each poll cycle
 #   --no-logs             On failure, print only pass/fail/cancel status; skip build log output
+#   --no-clean            Disable stripping of progress-indicator noise from log output
 # Examples:
 #   cci-wait-on-jobs
 #   cci-wait-on-jobs --progress
@@ -271,7 +315,7 @@ cci-failed-logs() {
 #   cci-wait-on-jobs github/my-org/my-repo feature/my-branch --interval 15 --progress
 cci-wait-on-jobs() {
   local slug branch
-  local interval=30 timeout=36000 progress=0 no_logs=0
+  local interval=30 timeout=36000 progress=0 no_logs=0 clean=1
 
   # --- parse args (positional slug/branch first, then flags) ------------------
   local positional=()
@@ -281,6 +325,7 @@ cci-wait-on-jobs() {
       --timeout)  timeout="$2";  shift 2 ;;
       --progress) progress=1;    shift   ;;
       --no-logs)  no_logs=1;     shift   ;;
+      --no-clean) clean=0;       shift   ;;
       *)          positional+=("$1"); shift ;;
     esac
   done
@@ -447,7 +492,11 @@ cci-wait-on-jobs() {
       any_failed=1
       if [[ "$no_logs" -eq 0 ]]; then
         printf '=== %s / %s (build #%s) ===\n\n' "$wf_name" "$job_name" "$job_number"
-        cci-log "$slug" "$job_number"
+        if [[ "$clean" -eq 1 ]]; then
+          cci-log "$slug" "$job_number"
+        else
+          cci-log --no-clean "$slug" "$job_number"
+        fi
         printf '\n'
       else
         printf '  failed  %s / %s (build #%s)\n' "$wf_name" "$job_name" "$job_number"
