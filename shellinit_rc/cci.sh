@@ -1,6 +1,6 @@
 # shellinit:contexts=any
 # shellinit:requires=api-curl
-# shellinit:tools=curl,jq,python3
+# shellinit:tools=curl,jq
 # ---------------------------------------------------------------------------
 # CircleCI helpers
 # All functions read $CCI_URL, $CCI_PERSONAL_TOKEN
@@ -66,7 +66,7 @@ cci-builds() {
   if [[ -n "$branch" ]]; then
     # URL-encode slashes in branch names (e.g. user/feature-branch)
     local encoded_branch
-    encoded_branch="$(printf '%s' "$branch" | python3 -c 'import sys,urllib.parse; print(urllib.parse.quote(sys.stdin.read(), safe=""))')"
+    encoded_branch="$(jq -rn --arg v "$branch" '$v | @uri')"
     endpoint="v1.1/project/${slug}/tree/${encoded_branch}"
   fi
   cci-curl "${endpoint}" -G --data-urlencode "limit=${limit}" \
@@ -354,7 +354,7 @@ cci-wait-on-jobs() {
   fi
 
   local encoded_branch
-  encoded_branch="$(printf '%s' "$branch" | python3 -c 'import sys,urllib.parse; print(urllib.parse.quote(sys.stdin.read(), safe=""))')"
+  encoded_branch="$(jq -rn --arg v "$branch" '$v | @uri')"
 
   # --- find the pipeline for the current remote SHA ---------------------------
   local pipeline_id pipeline_num
@@ -538,7 +538,7 @@ cci-current() {
   slug="github/${org}/${repo}"
 
   local encoded_branch
-  encoded_branch="$(printf '%s' "$branch" | python3 -c 'import sys,urllib.parse; print(urllib.parse.quote(sys.stdin.read(), safe=""))')"
+  encoded_branch="$(jq -rn --arg v "$branch" '$v | @uri')"
 
   printf 'Project : %s\n' "$slug"
   printf 'Branch  : %s\n' "$branch"
