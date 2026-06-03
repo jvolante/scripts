@@ -558,9 +558,11 @@ cci-wait-on-jobs() {
       fi
 
       # Print one line per job, grouped under their workflow.
-      # Header line: "[<elapsed>s]  workflow: <sym>"
-      # Job lines  : "  <job>: <sym>"
       local lines_printed=0
+
+      printf "[%ds]\n" "$elapsed"
+      (( lines_printed++ ))
+
       local wf_id wf_name wf_status
       while IFS=$'\t' read -r wf_id wf_name wf_status; do
         local wf_sym
@@ -571,7 +573,7 @@ cci-wait-on-jobs() {
           *)                            wf_sym="…" ;;
         esac
 
-        printf '\r\033[K[%ds]  %s: %s\n' "$elapsed" "$wf_name" "$wf_sym"
+        printf '\r\033[K%s %s\n' "$wf_sym" "$wf_name"
         (( lines_printed++ ))
 
         # For in-progress workflows, list every job on its own indented line.
@@ -588,7 +590,7 @@ cci-wait-on-jobs() {
               blocked)    job_sym="⏸" ;;
               *)          job_sym="?" ;;
             esac
-            printf '\r\033[K    %-40s %s\n' "$job_name" "$job_sym"
+            printf '\r\033[K    %s %-40s\n' "$job_sym" "$job_name"
             (( lines_printed++ ))
           done < <(cci-curl "v2/workflow/${wf_id}/job" 2>/dev/null \
             | jq -r '.items[] | "\(.name)\t\(.status)"' 2>/dev/null)
