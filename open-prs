@@ -32,10 +32,21 @@ graphql_query='
           headRefName
           baseRefName
           repository { nameWithOwner }
+          reviewDecision
           reviews(last: 50, states: [CHANGES_REQUESTED]) {
             nodes {
               author { login }
               state
+            }
+          }
+          reviewThreads(first: 50) {
+            nodes {
+              isResolved
+              comments(first: 1) {
+                nodes {
+                  author { login }
+                }
+              }
             }
           }
           commits(last: 1) {
@@ -95,19 +106,26 @@ if [ "$json_output" = true ]; then
       url | capture("https?://[^/]+/gh/(?<org>[^/]+)/(?<repo>[^/]+)/")
       | "github/\(.org)/\(.repo)";
 
-    [.[] | .commits.nodes[0].commit.statusCheckRollup.contexts.nodes |= (
-      if . == null then null
-      else [.[] |
-        if .__typename == "CheckRun" then
-          { name, status, conclusion,
-            circleci_slug: (try cci_slug(.detailsUrl) catch null) }
-        elif .__typename == "StatusContext" then
-          { context, state,
-            circleci_slug: (try cci_slug(.targetUrl) catch null) }
-        else . end
-      ]
-      end
-    )]
+    def unresolved_authors:
+      [(.reviewThreads.nodes // [])[] | select(.isResolved == false)
+       | .comments.nodes[0].author.login] | unique;
+
+    [.[] |
+      .commits.nodes[0].commit.statusCheckRollup.contexts.nodes |= (
+        if . == null then null
+        else [.[] |
+          if .__typename == "CheckRun" then
+            { name, status, conclusion,
+              circleci_slug: (try cci_slug(.detailsUrl) catch null) }
+          elif .__typename == "StatusContext" then
+            { context, state,
+              circleci_slug: (try cci_slug(.targetUrl) catch null) }
+          else . end
+        ]
+        end
+      ) |
+      . + { unresolved_thread_authors: unresolved_authors }
+    ]
   '
   exit 0
 fi
@@ -147,11 +165,32 @@ while IFS= read -r line; do
       end
   ')
 
-  # Build changes-requested lines (deduplicate reviewers)
-  changes_requested=$(printf '%s\n' "$line" | jq -r '
-    (.reviews.nodes // [])
-    | [.[].author.login] | unique | .[]
-    | "           [CHANGES REQUESTED] \(.)"
+  # Build review status lines
+  review_status=$(printf '%s\n' "$line" | jq -r '
+    # Formal CHANGES_REQUESTED reviewers
+    def cr_reviewers:
+      (.reviews.nodes // []) | [.[].author.login] | unique;
+
+    # Unresolved thread authors
+    def unresolved_authors:
+      [(.reviewThreads.nodes // [])[] | select(.isResolved == false)
+       | .comments.nodes[0].author.login] | unique;
+
+    # reviewDecision badge line
+    (if .reviewDecision == "CHANGES_REQUESTED" then
+       "           [CHANGES REQUESTED]"
+     elif .reviewDecision == "REVIEW_REQUIRED" then
+       "           [REVIEW REQUIRED]"
+     else empty
+     end),
+
+    # Formal changes-requested reviewers
+    (cr_reviewers[] | "             reviewer: \(.)"),
+
+    # Unresolved threads summary (only if any)
+    (unresolved_authors | if length > 0 then
+       "           [UNRESOLVED THREADS] by: \(join(", "))"
+     else empty end)
   ')
 
   pr_block=$(printf '  #%-4d %s\n           %s \u2192 %s\n           %s' \
@@ -161,8 +200,8 @@ while IFS= read -r line; do
     pr_block=$(printf '%s\n%s' "$pr_block" "$failing_ci")
   fi
 
-  if [ -n "$changes_requested" ]; then
-    pr_block=$(printf '%s\n%s' "$pr_block" "$changes_requested")
+  if [ -n "$review_status" ]; then
+    pr_block=$(printf '%s\n%s' "$pr_block" "$review_status")
   fi
 
   if [ -n "${repos[$key]}" ]; then
