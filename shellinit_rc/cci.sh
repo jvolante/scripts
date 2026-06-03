@@ -100,36 +100,169 @@ cci-workflow() {
   jq -n --argjson meta "$meta" --argjson jobs "$jobs" '$meta + {jobs: $jobs}'
 }
 
+# Sanitize secrets from log output on stdin.
+# Redacts SSH/TLS private keys, API tokens, and other credentials.
+# Each unique secret value is assigned a stable sequential ID so reuse is visible.
+# PEM private-key blocks are collapsed to a single marker line.
+# Usage: cci-log-sanitize
+# Example: cci-log github/my-org/my-repo 3001 | cci-log-sanitize
+cci-log-sanitize() {
+  awk '
+  # Return the stable ID for a given secret value, assigning one if new.
+  function secret_id(val,    id) {
+    if (val in _ids) return _ids[val]
+    id = ++_counter
+    _ids[val] = id
+    return id
+  }
+
+  # ---------------------------------------------------------------------------
+  BEGIN { _counter = 0; _in_pem = 0 }
+
+  # --- PEM block handling (stateful, collapse entire block) -------------------
+  /-----BEGIN [A-Z ]*KEY-----/ || /-----BEGIN CERTIFICATE-----/ || /-----BEGIN ENCRYPTED PRIVATE KEY-----/ {
+    _pem_marker = $0
+    # Use the BEGIN line itself as the key for stable ID assignment.
+    _pem_id = secret_id("pem:" _pem_marker)
+    print "[SECRET:pem-key:" _pem_id "]"
+    _in_pem = 1
+    next
+  }
+  _in_pem && /-----END / {
+    _in_pem = 0
+    next
+  }
+  _in_pem { next }
+
+  # --- inline secret patterns -------------------------------------------------
+  {
+    line = $0
+
+    # Circle-Token header value
+    while (match(line, /Circle-Token:[[:space:]]*([^[:space:]"'"'"'\\]+)/, m)) {
+      id = secret_id(m[1])
+      sub(m[1], "[SECRET:circle-token:" id "]", line)
+      break
+    }
+
+    # Authorization: Bearer <token>
+    while (match(line, /Authorization:[[:space:]]*Bearer[[:space:]]+([^[:space:]"'"'"'\\]+)/, m)) {
+      id = secret_id(m[1])
+      sub(m[1], "[SECRET:bearer-token:" id "]", line)
+      break
+    }
+
+    # Authorization: Basic <value>
+    while (match(line, /Authorization:[[:space:]]*Basic[[:space:]]+([^[:space:]"'"'"'\\]+)/, m)) {
+      id = secret_id(m[1])
+      sub(m[1], "[SECRET:basic-auth:" id "]", line)
+      break
+    }
+
+    # AWS access key IDs: AKIA followed by 16 uppercase alphanumerics
+    while (match(line, /(AKIA[A-Z0-9]{16})/, m)) {
+      id = secret_id(m[1])
+      gsub(m[1], "[SECRET:aws-key:" id "]", line)
+      break
+    }
+
+    # GitHub tokens: ghp_ / ghs_ followed by 36 or more alphanumerics
+    while (match(line, /(gh[ps]_[A-Za-z0-9]{36,})/, m)) {
+      id = secret_id(m[1])
+      gsub(m[1], "[SECRET:github-token:" id "]", line)
+      break
+    }
+
+    # GitLab personal access tokens: glpat- followed by 20 alphanumerics/hyphens
+    while (match(line, /(glpat-[A-Za-z0-9-]{20})/, m)) {
+      id = secret_id(m[1])
+      gsub(m[1], "[SECRET:gitlab-token:" id "]", line)
+      break
+    }
+
+    # JWT: three base64url segments each at least 20 chars, separated by dots
+    while (match(line, /([A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,})/, m)) {
+      id = secret_id(m[1])
+      gsub(m[1], "[SECRET:jwt:" id "]", line)
+      break
+    }
+
+    # SSH public keys in known_hosts format: <host> <key-type> <base64blob>
+    # Keeps the host and key-type (useful context) but replaces the blob.
+    # Key types: ssh-rsa, ssh-ed25519, ecdsa-sha2-nistp{256,384,521}
+    while (match(line, /^([^[:space:]]+[[:space:]]+(ssh-rsa|ssh-ed25519|ecdsa-sha2-nistp256|ecdsa-sha2-nistp384|ecdsa-sha2-nistp521)[[:space:]]+)(AAAA[A-Za-z0-9+\/]+=*)/, m)) {
+      id = secret_id(m[3])
+      # m[1] is "<host> <key-type> ", m[3] is the blob — replace blob with marker.
+      # Use substr arithmetic to avoid regex-metachar issues with sub().
+      blob_start = index(line, m[3])
+      line = substr(line, 1, blob_start - 1) "[PUBLIC-KEY:" m[2] ":" id "]" substr(line, blob_start + length(m[3]))
+      break
+    }
+
+    # Environment variable assignments where the var name suggests a secret.
+    # Matches: export FOO_TOKEN="value", FOO_SECRET=value, etc.
+    # Captures only the value portion so the var name stays visible.
+    while (match(line, /[Ee][Xx][Pp][Oo][Rr][Tt][[:space:]]+[A-Z_a-z][A-Z_a-z0-9]*(_[Kk][Ee][Yy]|_[Tt][Oo][Kk][Ee][Nn]|_[Ss][Ee][Cc][Rr][Ee][Tt]|_[Pp][Aa][Ss][Ss][Ww][Oo][Rr][Dd]|_[Pp][Aa][Ss][Ss][Ww][Dd]|_[Cc][Rr][Ee][Dd][Ee][Nn][Tt][Ii][Aa][Ll])[[:space:]]*=[[:space:]]*([^[:space:]"'"'"';\\]+)/, m) || \
+          match(line, /[A-Z_][A-Z_0-9]*(_KEY|_TOKEN|_SECRET|_PASSWORD|_PASSWD|_CREDENTIAL)[[:space:]]*=[[:space:]]*([^[:space:]"'"'"';\\]+)/, m)) {
+      # Capture group index differs: use whichever is non-empty.
+      val = (m[2] != "") ? m[2] : m[3]
+      if (val != "" && val !~ /^\[SECRET:/) {
+        id = secret_id(val)
+        gsub(val, "[SECRET:env-secret:" id "]", line)
+      }
+      break
+    }
+
+    print line
+  }
+  '
+}
+
 # Strip progress-indicator noise from CCI log output.
 # Simulates terminal CR-overwrite behaviour: for each line, keeps only the
 # final segment after the last bare \r (the state a terminal would display).
 # Works on any tool that uses \r to redraw progress (git, pip, npm, etc.).
-# Usage: cci-log-clean
+# By default also sanitizes secrets (SSH/API keys etc.) — use --no-sanitize to skip.
+# Usage: cci-log-clean [--no-sanitize]
 # Example: cci-log github/my-org/my-repo 3001 | cci-log-clean
 cci-log-clean() {
+  local sanitize=1
+  if [[ "${1:-}" == "--no-sanitize" ]]; then
+    sanitize=0
+    shift
+  fi
   # Pass 1 (--across): normalise CRLF → LF so \r\n line endings are not
   #         mistaken for progress overwrites in pass 2.
   # Pass 2 (line-by-line): strip everything up to and including the last
   #         bare \r on each line, leaving only the final overwrite state.
-  sd --across '\x0d\x0a' '\x0a' | sd '.*\x0d' ''
+  # Pass 3 (optional): redact secrets.
+  if [[ "$sanitize" -eq 1 ]]; then
+    sd --across '\x0d\x0a' '\x0a' | sd '.*\x0d' '' | cci-log-sanitize
+  else
+    sd --across '\x0d\x0a' '\x0a' | sd '.*\x0d' ''
+  fi
 }
 
 # Get build log output for a single job
 # Falls back to fetching presigned output URLs from the v1.1 job detail when
 # the direct /output endpoint returns a non-JSON 404 (common on self-hosted CCI).
-# Progress-indicator noise is stripped by default (see cci-log-clean).
-# Usage: cci-log [--no-clean] <project-slug> <build-num>
+# Progress-indicator noise and secrets are sanitized by default (see cci-log-clean).
+# Usage: cci-log [--no-clean] [--no-sanitize] <project-slug> <build-num>
 # Example: cci-log github/my-org/my-repo 3001
 #          cci-log --no-clean github/my-org/my-repo 3001
+#          cci-log --no-sanitize github/my-org/my-repo 3001
 cci-log() {
-  local clean=1
-  if [[ "${1:-}" == "--no-clean" ]]; then
-    clean=0
-    shift
-  fi
+  local clean=1 sanitize=1
+  while [[ "${1:-}" == --* ]]; do
+    case "$1" in
+      --no-clean)    clean=0;    shift ;;
+      --no-sanitize) sanitize=0; shift ;;
+      *) break ;;
+    esac
+  done
 
   if [[ $# -lt 2 ]]; then
-    printf 'Usage: cci-log [--no-clean] <project-slug> <build-num>\n' >&2
+    printf 'Usage: cci-log [--no-clean] [--no-sanitize] <project-slug> <build-num>\n' >&2
     return 1
   fi
   local slug="$1"
@@ -158,7 +291,11 @@ cci-log() {
   }
 
   if [[ "$clean" -eq 1 ]]; then
-    _cci-log-raw | cci-log-clean
+    if [[ "$sanitize" -eq 1 ]]; then
+      _cci-log-raw | cci-log-clean
+    else
+      _cci-log-raw | cci-log-clean --no-sanitize
+    fi
   else
     _cci-log-raw
   fi
@@ -239,22 +376,27 @@ cci-slug() {
 
 # Fetch logs for the most recently failed job on the current branch (or a given slug+branch).
 # Infers the project slug and branch from git when not provided.
-# Progress-indicator noise is stripped by default (see cci-log-clean).
-# Usage: cci-failed-logs [--no-clean] [project-slug [branch]]
+# Progress-indicator noise and secrets are sanitized by default (see cci-log-clean).
+# Usage: cci-failed-logs [--no-clean] [--no-sanitize] [project-slug [branch]]
 # Options:
-#   --no-clean  Disable stripping of progress-indicator noise from log output
+#   --no-clean     Disable stripping of progress-indicator noise from log output
+#   --no-sanitize  Disable secret sanitization from log output
 # Examples:
 #   cci-failed-logs
 #   cci-failed-logs --no-clean
+#   cci-failed-logs --no-sanitize
 #   cci-failed-logs github/my-org/my-repo
 #   cci-failed-logs github/my-org/my-repo feature/my-branch
 cci-failed-logs() {
-  local slug branch clean=1
+  local slug branch clean=1 sanitize=1
 
-  if [[ "${1:-}" == "--no-clean" ]]; then
-    clean=0
-    shift
-  fi
+  while [[ "${1:-}" == --* ]]; do
+    case "$1" in
+      --no-clean)    clean=0;    shift ;;
+      --no-sanitize) sanitize=0; shift ;;
+      *) break ;;
+    esac
+  done
 
   if [[ $# -ge 1 ]]; then
     slug="$1"
@@ -288,11 +430,10 @@ cci-failed-logs() {
 
   printf 'Failed job : %s / %s  (build #%s)\n\n' "$workflow_name" "$job_name" "$build_num"
 
-  if [[ "$clean" -eq 1 ]]; then
-    cci-log "$slug" "$build_num"
-  else
-    cci-log --no-clean "$slug" "$build_num"
-  fi
+  local log_flags=()
+  [[ "$clean" -eq 0 ]]    && log_flags+=(--no-clean)
+  [[ "$sanitize" -eq 0 ]] && log_flags+=(--no-sanitize)
+  cci-log "${log_flags[@]}" "$slug" "$build_num"
 }
 
 # Wait for all CI jobs on the current branch's remote HEAD to finish, then print a summary.
@@ -301,32 +442,35 @@ cci-failed-logs() {
 # Only watches pipelines whose revision matches the current remote tracking SHA, so a
 # stale in-progress pipeline from a previous push is ignored.
 #
-# Usage: cci-wait-on-jobs [project-slug [branch]] [--interval <seconds>] [--timeout <seconds>] [--progress] [--no-logs] [--no-clean]
+# Usage: cci-wait-on-jobs [project-slug [branch]] [--interval <seconds>] [--timeout <seconds>] [--progress] [--no-logs] [--no-clean] [--no-sanitize]
 # Options:
 #   --interval <seconds>  Poll interval (default: 30)
 #   --timeout  <seconds>  Give up after this many seconds (default: 36000)
 #   --progress            Print a live job-status table on each poll cycle
 #   --no-logs             On failure, print only pass/fail/cancel status; skip build log output
 #   --no-clean            Disable stripping of progress-indicator noise from log output
+#   --no-sanitize         Disable secret sanitization from log output
 # Examples:
 #   cci-wait-on-jobs
 #   cci-wait-on-jobs --progress
 #   cci-wait-on-jobs --no-logs
+#   cci-wait-on-jobs --no-sanitize
 #   cci-wait-on-jobs github/my-org/my-repo feature/my-branch --interval 15 --progress
 cci-wait-on-jobs() {
   local slug branch
-  local interval=30 timeout=36000 progress=0 no_logs=0 clean=1
+  local interval=30 timeout=36000 progress=0 no_logs=0 clean=1 sanitize=1
 
   # --- parse args (positional slug/branch first, then flags) ------------------
   local positional=()
   while [[ $# -gt 0 ]]; do
     case "$1" in
-      --interval) interval="$2"; shift 2 ;;
-      --timeout)  timeout="$2";  shift 2 ;;
-      --progress) progress=1;    shift   ;;
-      --no-logs)  no_logs=1;     shift   ;;
-      --no-clean) clean=0;       shift   ;;
-      *)          positional+=("$1"); shift ;;
+      --interval)    interval="$2";  shift 2 ;;
+      --timeout)     timeout="$2";   shift 2 ;;
+      --progress)    progress=1;     shift   ;;
+      --no-logs)     no_logs=1;      shift   ;;
+      --no-clean)    clean=0;        shift   ;;
+      --no-sanitize) sanitize=0;     shift   ;;
+      *)             positional+=("$1"); shift ;;
     esac
   done
 
@@ -492,11 +636,10 @@ cci-wait-on-jobs() {
       any_failed=1
       if [[ "$no_logs" -eq 0 ]]; then
         printf '=== %s / %s (build #%s) ===\n\n' "$wf_name" "$job_name" "$job_number"
-        if [[ "$clean" -eq 1 ]]; then
-          cci-log "$slug" "$job_number"
-        else
-          cci-log --no-clean "$slug" "$job_number"
-        fi
+        local log_flags=()
+        [[ "$clean" -eq 0 ]]    && log_flags+=(--no-clean)
+        [[ "$sanitize" -eq 0 ]] && log_flags+=(--no-sanitize)
+        cci-log "${log_flags[@]}" "$slug" "$job_number"
         printf '\n'
       else
         printf '  failed  %s / %s (build #%s)\n' "$wf_name" "$job_name" "$job_number"
