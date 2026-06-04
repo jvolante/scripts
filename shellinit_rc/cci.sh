@@ -330,16 +330,19 @@ cci-trigger() {
 }
 
 # List all followed projects
+# Output is a single JSON array of {slug, repo, org, url, branches} objects, so it can be
+# consumed directly with `jq '.[] | ...'` (no `jq -s`/`-rs` slurp required).
 # Usage: cci-projects
+# Example: cci-projects | jq -r '.[] | select(.url | test("my-repo")) | .slug'
 cci-projects() {
   cci-curl v1.1/projects \
-  | jq '.[] | {
+  | jq '[.[] | {
       slug:     ("github/" + .username + "/" + .reponame),
       repo:     .reponame,
       org:      .username,
       url:      .vcs_url,
       branches: (.branches | keys | length)
-    }'
+    }]'
 }
 
 # Resolve the canonical CircleCI project slug from the current git repo's origin remote.
@@ -377,23 +380,27 @@ cci-slug() {
 # Fetch logs for the most recently failed job on the current branch (or a given slug+branch).
 # Infers the project slug and branch from git when not provided.
 # Progress-indicator noise and secrets are sanitized by default (see cci-log-clean).
-# Usage: cci-failed-logs [--no-clean] [--no-sanitize] [project-slug [branch]]
+# Usage: cci-failed-logs [--no-clean] [--no-sanitize] [--workflow <name>] [project-slug [branch]]
 # Options:
-#   --no-clean     Disable stripping of progress-indicator noise from log output
-#   --no-sanitize  Disable secret sanitization from log output
+#   --no-clean         Disable stripping of progress-indicator noise from log output
+#   --no-sanitize      Disable secret sanitization from log output
+#   --workflow <name>  Only consider failed builds from this workflow (e.g. build-and-test),
+#                      so noisy unrelated workflows (sheath, build-debug, ...) don't shadow it
 # Examples:
 #   cci-failed-logs
 #   cci-failed-logs --no-clean
 #   cci-failed-logs --no-sanitize
+#   cci-failed-logs --workflow build-and-test
 #   cci-failed-logs github/my-org/my-repo
 #   cci-failed-logs github/my-org/my-repo feature/my-branch
 cci-failed-logs() {
-  local slug branch clean=1 sanitize=1
+  local slug branch clean=1 sanitize=1 workflow=""
 
   while [[ "${1:-}" == --* ]]; do
     case "$1" in
       --no-clean)    clean=0;    shift ;;
       --no-sanitize) sanitize=0; shift ;;
+      --workflow)    workflow="$2"; shift 2 ;;
       *) break ;;
     esac
   done
@@ -411,15 +418,25 @@ cci-failed-logs() {
   fi
 
   printf 'Project : %s\n' "$slug"
-  printf 'Branch  : %s\n\n' "$branch"
+  printf 'Branch  : %s\n' "$branch"
+  [[ -n "$workflow" ]] && printf 'Workflow: %s\n' "$workflow"
+  printf '\n'
 
-  # Find the most recently failed build on this branch
+  # Find the most recently failed build on this branch, optionally scoped to a workflow.
   local failed_build
   failed_build=$(cci-builds "$slug" "$branch" 25 \
-    | jq -s 'map(select(.status == "failed")) | first | {build_num, job, workflow}')
+    | jq -s --arg wf "$workflow" '
+        map(select(.status == "failed"))
+        | map(select($wf == "" or .workflow == $wf))
+        | first
+        | {build_num, job, workflow}')
 
   if [[ -z "$failed_build" || "$failed_build" == "null" ]]; then
-    printf 'No failed builds found for %s on %s\n' "$slug" "$branch" >&2
+    if [[ -n "$workflow" ]]; then
+      printf 'No failed builds found for %s on %s in workflow %s\n' "$slug" "$branch" "$workflow" >&2
+    else
+      printf 'No failed builds found for %s on %s\n' "$slug" "$branch" >&2
+    fi
     return 1
   fi
 
@@ -657,30 +674,15 @@ cci-wait-on-jobs() {
 # Infers the project slug from the git remote URL and the branch from git.
 # Usage: cci-current
 cci-current() {
-  local remote_url branch slug org repo pipeline_id
-  remote_url=$(git remote get-url origin 2>/dev/null)
-  if [[ -z "$remote_url" ]]; then
-    printf 'cci-current: not inside a git repo with an origin remote\n' >&2
-    return 1
-  fi
+  local branch slug pipeline_id
+  # cci-slug handles all four remote URL forms (SSH/HTTPS, with/without .git suffix)
+  # and resolves the canonical slug via the API, so reuse it instead of re-parsing here.
+  slug=$(cci-slug) || return 1
   branch=$(git branch --show-current 2>/dev/null)
   if [[ -z "$branch" ]]; then
     printf 'cci-current: could not determine current branch\n' >&2
     return 1
   fi
-
-  # Parse org/repo from SSH (git@host:org/repo.git) or HTTPS (https://host/org/repo.git)
-  if [[ "$remote_url" =~ ^git@[^:]+:([^/]+)/(.+)\.git$ ]]; then
-    org="${BASH_REMATCH[1]}"
-    repo="${BASH_REMATCH[2]}"
-  elif [[ "$remote_url" =~ ^https?://[^/]+/([^/]+)/(.+?)(.git)?$ ]]; then
-    org="${BASH_REMATCH[1]}"
-    repo="${BASH_REMATCH[2]}"
-  else
-    printf 'cci-current: could not parse org/repo from remote URL: %s\n' "$remote_url" >&2
-    return 1
-  fi
-  slug="github/${org}/${repo}"
 
   local encoded_branch
   encoded_branch="$(jq -rn --arg v "$branch" '$v | @uri')"
@@ -705,4 +707,77 @@ cci-current() {
   | while IFS=$'\t' read -r status name wf_id; do
       printf '  %-10s  %s\n' "$status" "$name"
     done
+}
+
+# Show the full pipeline -> workflow -> job tree for a given commit SHA.
+# Unlike cci-current (which shows only workflow-level status for the latest pipeline on the
+# branch), this scopes to a specific commit and lists every job with its status and build
+# number under each workflow. Useful on repos where one commit triggers several workflows
+# (e.g. build-and-test, build-release, build-debug, sheath-...) so you can map a failing
+# build number back to its workflow without hand-built jq chains.
+#
+# Defaults to the current branch's remote HEAD (origin/<branch>) when no SHA is given.
+# Usage: cci-pipeline-status [sha] [project-slug [branch]]
+# Examples:
+#   cci-pipeline-status                         # remote HEAD of current branch
+#   cci-pipeline-status 4f9e167                 # specific SHA on current branch
+#   cci-pipeline-status 4f9e167 github/my-org/my-repo feature/my-branch
+cci-pipeline-status() {
+  local sha slug branch
+  sha="${1:-}"
+
+  if [[ $# -ge 2 ]]; then
+    slug="$2"
+    branch="${3:-}"
+  else
+    slug=$(cci-slug) || return 1
+    branch=$(git branch --show-current 2>/dev/null)
+  fi
+  if [[ -z "$branch" ]]; then
+    printf 'cci-pipeline-status: could not determine branch\n' >&2
+    return 1
+  fi
+
+  # Resolve the SHA from the branch's remote tracking ref when not supplied.
+  if [[ -z "$sha" ]]; then
+    sha=$(git rev-parse "origin/${branch}" 2>/dev/null)
+    if [[ -z "$sha" ]]; then
+      printf 'cci-pipeline-status: could not resolve remote SHA for origin/%s\n' "$branch" >&2
+      return 1
+    fi
+  fi
+
+  local encoded_branch
+  encoded_branch="$(jq -rn --arg v "$branch" '$v | @uri')"
+
+  # Find the pipeline whose revision matches the SHA. Match by prefix so a short SHA works.
+  local pipeline_json pipeline_id pipeline_num
+  pipeline_json=$(cci-curl "v2/project/${slug}/pipeline?branch=${encoded_branch}" 2>/dev/null \
+    | jq --arg sha "$sha" '
+        .items | map(select(.vcs.revision | startswith($sha))) | first
+        | {id, number, revision: .vcs.revision}')
+  pipeline_id=$(printf '%s' "$pipeline_json" | jq -r '.id // empty')
+  pipeline_num=$(printf '%s' "$pipeline_json" | jq -r '.number // empty')
+
+  if [[ -z "$pipeline_id" ]]; then
+    printf 'cci-pipeline-status: no pipeline found for SHA %s on %s\n' "${sha:0:8}" "$branch" >&2
+    return 1
+  fi
+
+  printf 'Project : %s\n' "$slug"
+  printf 'Branch  : %s\n' "$branch"
+  printf 'Commit  : %s\n' "${sha:0:12}"
+  printf 'Pipeline: #%s (%s)\n\n' "$pipeline_num" "${pipeline_id:0:8}"
+
+  # For each workflow, print its status then its jobs (status + build number) indented.
+  local wf_id wf_name wf_status
+  while IFS=$'\t' read -r wf_id wf_name wf_status; do
+    printf '%-10s  %s\n' "$wf_status" "$wf_name"
+    cci-curl "v2/workflow/${wf_id}/job" 2>/dev/null \
+    | jq -r '.items[] | "\(.status)\t\(.name)\t\(.job_number // "-")"' \
+    | while IFS=$'\t' read -r job_status job_name job_num; do
+        printf '    %-10s  %-40s #%s\n' "$job_status" "$job_name" "$job_num"
+      done
+  done < <(cci-curl "v2/pipeline/${pipeline_id}/workflow" 2>/dev/null \
+    | jq -r '.items[] | "\(.id)\t\(.name)\t\(.status)"')
 }
