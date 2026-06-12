@@ -1,0 +1,368 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+# Convert common British English spellings to Standard American English across
+# files in a directory tree.  All arguments are passed through to replace-in-files
+# before the mandatory <pattern> <replacement> <directories...> positional args,
+# so flags like -d (dry-run), -j (jobs), -b (backup), and -t (file type) all work.
+#
+# Usage:
+#   british-to-american [REPLACE-IN-FILES OPTIONS] <directories...>
+#
+# Examples:
+#   british-to-american src/                   # apply in-place
+#   british-to-american -d src/                # dry-run (no modifications)
+#   british-to-american -j 4 -t py src/ lib/   # 4 jobs, Python files only
+#   british-to-american -b .bak src/           # backup before modifying
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+readonly REPLACE="${SCRIPT_DIR}/replace-in-files"
+
+if [[ ! -x "$REPLACE" ]]; then
+    printf "Error: replace-in-files not found or not executable at %s\n" "$REPLACE" >&2
+    exit 1
+fi
+
+usage() {
+    cat <<EOF
+Usage: $(basename "$0") [REPLACE-IN-FILES OPTIONS] <directories...>
+
+Replaces common British English spellings with American English equivalents
+across all text files in the given directories.
+
+All OPTIONS are forwarded verbatim to replace-in-files:
+    -d, --dry-run       Show changes without modifying files
+    -j, --jobs NUM      Max parallel jobs (default: nproc)
+    -b, --backup EXT    Create backup files (e.g. -b .bak)
+    -t, --type TYPE     Restrict to a ripgrep file type (repeatable)
+    -h, --help          Show this help message
+
+EXAMPLES:
+    $(basename "$0") src/
+    $(basename "$0") -d src/
+    $(basename "$0") -j 4 -t py src/ lib/
+    $(basename "$0") -b .bak .
+EOF
+    exit 0
+}
+
+# ---------------------------------------------------------------------------
+# Substitution table: (pattern, replacement) pairs.
+# Patterns use \b word-boundaries to avoid partial-word matches (e.g. "colour"
+# inside "discoloured" would still match — intentionally, since the suffix
+# itself carries the British spelling).  Case-insensitive flag (?i) is used so
+# that COLOUR, Colour, and colour are all handled; the replacement preserves
+# the lower-case American form and the pattern's capture group restores leading
+# capitalisation where needed.
+#
+# Format: alternating entries — even indices are patterns, odd are replacements.
+#
+# NOTE: ${1} tokens in the replacement strings are Rust regex back-references
+# consumed by `sd` — they are intentionally single-quoted to prevent the shell
+# from expanding them.
+# shellcheck disable=SC2016
+# ---------------------------------------------------------------------------
+declare -a SUBSTITUTIONS=(
+    # -our  →  -or
+    '(?i)\bcolour\b'            'color'
+    '(?i)\bcolours\b'           'colors'
+    '(?i)\bcoloured\b'          'colored'
+    '(?i)\bcolouring\b'         'coloring'
+    '(?i)\bcolourful\b'         'colorful'
+    '(?i)\bcolourless\b'        'colorless'
+    '(?i)\bflavour\b'           'flavor'
+    '(?i)\bflavours\b'          'flavors'
+    '(?i)\bflavoured\b'         'flavored'
+    '(?i)\bflavouring\b'        'flavoring'
+    '(?i)\bflavourful\b'        'flavorful'
+    '(?i)\bhonour\b'            'honor'
+    '(?i)\bhonours\b'           'honors'
+    '(?i)\bhonoured\b'          'honored'
+    '(?i)\bhonorable\b'         'honorable'
+    '(?i)\bhumour\b'            'humor'
+    '(?i)\bhumours\b'           'humors'
+    '(?i)\bhumoured\b'          'humored'
+    '(?i)\bhumouring\b'         'humoring'
+    '(?i)\bhumourous\b'         'humorous'
+    '(?i)\blabour\b'            'labor'
+    '(?i)\blabours\b'           'labors'
+    '(?i)\blaboured\b'          'labored'
+    '(?i)\blabouring\b'         'laboring'
+    '(?i)\blabourer\b'          'laborer'
+    '(?i)\blabourers\b'         'laborers'
+    '(?i)\bneighbour\b'         'neighbor'
+    '(?i)\bneighbours\b'        'neighbors'
+    '(?i)\bneighbourhood\b'     'neighborhood'
+    '(?i)\bneighbourhoods\b'    'neighborhoods'
+    '(?i)\bneighbouring\b'      'neighboring'
+    '(?i)\brumour\b'            'rumor'
+    '(?i)\brumours\b'           'rumors'
+    '(?i)\brumoured\b'          'rumored'
+    '(?i)\bvalour\b'            'valor'
+    '(?i)\bvigour\b'            'vigor'
+
+    # -ise  →  -ize  (verb forms; ${1} tokens are Rust regex back-references for sd)
+    '(?i)\b(\w+)ise\b'          '${1}ize'
+    '(?i)\b(\w+)ised\b'         '${1}ized'
+    '(?i)\b(\w+)ises\b'         '${1}izes'
+    '(?i)\b(\w+)ising\b'        '${1}izing'
+    '(?i)\b(\w+)isation\b'      '${1}ization'
+    '(?i)\b(\w+)isations\b'     '${1}izations'
+    '(?i)\b(\w+)iser\b'         '${1}izer'
+    '(?i)\b(\w+)isers\b'        '${1}izers'
+
+    # -yse  →  -yze  (analyse, paralyse, etc.)
+    '(?i)\b(\w+)yse\b'          '${1}yze'
+    '(?i)\b(\w+)ysed\b'         '${1}yzed'
+    '(?i)\b(\w+)yses\b'         '${1}yzes'
+    '(?i)\b(\w+)ysing\b'        '${1}yzing'
+
+    # -re  →  -er  (specific common words — avoids false positives on e.g. "ore")
+    '(?i)\bcentre\b'            'center'
+    '(?i)\bcentres\b'           'centers'
+    '(?i)\bfibre\b'             'fiber'
+    '(?i)\bfibres\b'            'fibers'
+    '(?i)\blitre\b'             'liter'
+    '(?i)\blitres\b'            'liters'
+    '(?i)\bmetre\b'             'meter'
+    '(?i)\bmetres\b'            'meters'
+    '(?i)\bsepulchre\b'         'sepulcher'
+    '(?i)\bspectre\b'           'specter'
+    '(?i)\bspectres\b'          'specters'
+    '(?i)\btheatre\b'           'theater'
+    '(?i)\btheatres\b'          'theaters'
+
+    # Doubled-l British forms  →  single-l American forms
+    '(?i)\bcancelled\b'         'canceled'
+    '(?i)\bcancelling\b'        'canceling'
+    '(?i)\bcancellation\b'      'cancelation'
+    '(?i)\bcancellations\b'     'cancelations'
+    '(?i)\bcounselled\b'        'counseled'
+    '(?i)\bcounselling\b'       'counseling'
+    '(?i)\bcounsellor\b'        'counselor'
+    '(?i)\bcounsellors\b'       'counselors'
+    '(?i)\benrolment\b'         'enrollment'
+    '(?i)\bfulfil\b'            'fulfill'
+    '(?i)\bfulfils\b'           'fulfills'
+    '(?i)\bfulfilment\b'        'fulfillment'
+    '(?i)\bjewellery\b'         'jewelry'
+    '(?i)\blabelled\b'          'labeled'
+    '(?i)\blabelling\b'         'labeling'
+    '(?i)\blabeller\b'          'labeler'
+    '(?i)\blevelled\b'          'leveled'
+    '(?i)\blevelling\b'         'leveling'
+    '(?i)\bmodelled\b'          'modeled'
+    '(?i)\bmodelling\b'         'modeling'
+    '(?i)\bmodeller\b'          'modeler'
+    '(?i)\bmodellers\b'         'modelers'
+    '(?i)\bravelled\b'          'raveled'
+    '(?i)\bravelling\b'         'raveling'
+    '(?i)\bsignalled\b'         'signaled'
+    '(?i)\bsignalling\b'        'signaling'
+    '(?i)\btravelled\b'         'traveled'
+    '(?i)\btravelling\b'        'traveling'
+    '(?i)\btraveller\b'         'traveler'
+    '(?i)\btravellers\b'        'travelers'
+    '(?i)\bwilful\b'            'willful'
+    '(?i)\bwilfully\b'          'willfully'
+
+    # -ogue  →  -og
+    '(?i)\bcatalogue\b'         'catalog'
+    '(?i)\bcatalogues\b'        'catalogs'
+    '(?i)\bdialogue\b'          'dialog'
+    '(?i)\bdialogues\b'         'dialogs'
+    '(?i)\bmonologue\b'         'monolog'
+    '(?i)\bprologue\b'          'prolog'
+    '(?i)\bepilogue\b'          'epilog'
+
+    # -amme  →  -am  (programme)
+    '(?i)\bprogramme\b'         'program'
+    '(?i)\bprogrammes\b'        'programs'
+
+    # Miscellaneous
+    '(?i)\banaemia\b'           'anemia'
+    '(?i)\baeroplane\b'         'airplane'
+    '(?i)\baeroplanes\b'        'airplanes'
+    '(?i)\baesthetic\b'         'esthetic'
+    '(?i)\baesthetics\b'        'esthetics'
+    '(?i)\baesthetically\b'     'esthetically'
+    '(?i)\banaesthetic\b'       'anesthetic'
+    '(?i)\banaesthetics\b'      'anesthetics'
+    '(?i)\bbehaviour\b'         'behavior'
+    '(?i)\bbehaviours\b'        'behaviors'
+    '(?i)\bbehavioural\b'       'behavioral'
+    '(?i)\bcheque\b'            'check'
+    '(?i)\bcheques\b'           'checks'
+    '(?i)\bdefence\b'           'defense'
+    '(?i)\bdefences\b'          'defenses'
+    '(?i)\bdefenceless\b'       'defenseless'
+    '(?i)\bdraught\b'           'draft'
+    '(?i)\bdraughts\b'          'drafts'
+    '(?i)\bdraughty\b'          'drafty'
+    '(?i)\benquire\b'           'inquire'
+    '(?i)\benquired\b'          'inquired'
+    '(?i)\benquires\b'          'inquires'
+    '(?i)\benquiring\b'         'inquiring'
+    '(?i)\benquiry\b'           'inquiry'
+    '(?i)\benquiries\b'         'inquiries'
+    '(?i)\bfavourite\b'         'favorite'
+    '(?i)\bfavourites\b'        'favorites'
+    '(?i)\bfoetus\b'            'fetus'
+    '(?i)\bgaol\b'              'jail'
+    '(?i)\bgrey\b'              'gray'
+    '(?i)\bgreys\b'             'grays'
+    '(?i)\bgreyed\b'            'grayed'
+    '(?i)\bgreying\b'           'graying'
+    '(?i)\bgreyish\b'           'grayish'
+    '(?i)\bgynaecology\b'       'gynecology'
+    '(?i)\bgynaecocological\b'  'gynecological'
+    '(?i)\bgynaecologist\b'     'gynecologist'
+    '(?i)\bgynaecologists\b'    'gynecologists'
+    '(?i)\bhaemoglobin\b'       'hemoglobin'
+    '(?i)\bhaemorrhage\b'       'hemorrhage'
+    '(?i)\bhaemorrhages\b'      'hemorrhages'
+    '(?i)\bhomologue\b'         'homolog'
+    '(?i)\bhomologues\b'        'homologs'
+    '(?i)\binstalment\b'        'installment'
+    '(?i)\binstalments\b'       'installments'
+    '(?i)\bleukaemia\b'         'leukemia'
+    '(?i)\blicence\b'           'license'
+    '(?i)\blicences\b'          'licenses'
+    '(?i)\bmanoeuvre\b'         'maneuver'
+    '(?i)\bmanoeuvres\b'        'maneuvers'
+    '(?i)\bmanoeuvred\b'        'maneuvered'
+    '(?i)\bmanoeuvring\b'       'maneuvering'
+    '(?i)\bmould\b'             'mold'
+    '(?i)\bmoulds\b'            'molds'
+    '(?i)\bmoulded\b'           'molded'
+    '(?i)\bmoulding\b'          'molding'
+    '(?i)\bmouldy\b'            'moldy'
+    '(?i)\bmoult\b'             'molt'
+    '(?i)\bmoults\b'            'molts'
+    '(?i)\bmoulting\b'          'molting'
+    '(?i)\boestrogen\b'         'estrogen'
+    '(?i)\boffence\b'           'offense'
+    '(?i)\boffences\b'          'offenses'
+    '(?i)\bpaediatric\b'        'pediatric'
+    '(?i)\bpaediatrics\b'       'pediatrics'
+    '(?i)\bpaediatrician\b'     'pediatrician'
+    '(?i)\bpaediatricians\b'    'pediatricians'
+    '(?i)\bpractise\b'          'practice'
+    '(?i)\bpractised\b'         'practiced'
+    '(?i)\bpractises\b'         'practices'
+    '(?i)\bpractising\b'        'practicing'
+    '(?i)\bpretence\b'          'pretense'
+    '(?i)\bpretences\b'         'pretenses'
+    '(?i)\bpyjamas\b'           'pajamas'
+    '(?i)\bsceptic\b'           'skeptic'
+    '(?i)\bsceptics\b'          'skeptics'
+    '(?i)\bsceptical\b'         'skeptical'
+    '(?i)\bscepticism\b'        'skepticism'
+    '(?i)\bsmoulder\b'          'smolder'
+    '(?i)\bsmouldering\b'       'smoldering'
+    '(?i)\bsulphur\b'           'sulfur'
+    '(?i)\bsulphate\b'          'sulfate'
+    '(?i)\bsulphide\b'          'sulfide'
+    '(?i)\bsulphuric\b'         'sulfuric'
+    '(?i)\bstorey\b'            'story'
+    '(?i)\bstoreys\b'           'stories'
+    '(?i)\btyre\b'              'tire'
+    '(?i)\btyres\b'             'tires'
+    '(?i)\bwoollen\b'           'woolen'
+    '(?i)\bwoollens\b'          'woolens'
+    '(?i)\bwoolly\b'            'wooly'
+)
+
+# ---------------------------------------------------------------------------
+# Argument parsing: collect replace-in-files flags (everything before the
+# first non-flag argument) and the trailing directory list.
+# ---------------------------------------------------------------------------
+passthrough_args=()
+directories=()
+
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        -h|--help)
+            usage
+            ;;
+        # Flags that consume the next token
+        -j|--jobs|-b|--backup|-t|--type)
+            if [[ -z "${2:-}" ]]; then
+                printf "Error: %s requires an argument\n" "$1" >&2
+                exit 1
+            fi
+            passthrough_args+=("$1" "$2")
+            shift 2
+            ;;
+        # Boolean flags
+        -d|--dry-run)
+            passthrough_args+=("$1")
+            shift
+            ;;
+        -*)
+            printf "Error: Unknown option: %s\n" "$1" >&2
+            printf "Use -h or --help for usage information\n" >&2
+            exit 1
+            ;;
+        *)
+            directories+=("$1")
+            shift
+            ;;
+    esac
+done
+
+if [[ ${#directories[@]} -eq 0 ]]; then
+    printf "Error: at least one directory argument is required\n" >&2
+    printf "Use -h or --help for usage information\n" >&2
+    exit 1
+fi
+
+# Validate directories up front so we fail fast before running any replacements.
+for dir in "${directories[@]}"; do
+    if [[ ! -d "$dir" ]]; then
+        printf "Error: Directory not found: %s\n" "$dir" >&2
+        exit 1
+    fi
+done
+
+# ---------------------------------------------------------------------------
+# Run each substitution pair.
+# ---------------------------------------------------------------------------
+assert_even_substitutions() {
+    local count=${#SUBSTITUTIONS[@]}
+    if (( count % 2 != 0 )); then
+        printf "Internal error: SUBSTITUTIONS table has odd length (%d)\n" "$count" >&2
+        exit 2
+    fi
+}
+assert_even_substitutions
+
+total=$(( ${#SUBSTITUTIONS[@]} / 2 ))
+printf "Applying %d British→American substitution rules...\n" "$total" >&2
+
+# Determine whether we are in dry-run mode so we can emit one banner instead
+# of one per rule.
+is_dry_run=0
+for arg in "${passthrough_args[@]}"; do
+    if [[ "$arg" == "-d" || "$arg" == "--dry-run" ]]; then
+        is_dry_run=1
+        break
+    fi
+done
+
+if [[ "$is_dry_run" -eq 1 ]]; then
+    printf "Running in DRY-RUN mode - no files will be modified\n" >&2
+    printf "Remove -d or --dry-run to apply changes\n" >&2
+fi
+
+for (( i = 0; i < ${#SUBSTITUTIONS[@]}; i += 2 )); do
+    pattern="${SUBSTITUTIONS[$i]}"
+    replacement="${SUBSTITUTIONS[$((i + 1))]}"
+    # Filter stderr: suppress the per-invocation dry-run banner lines emitted
+    # by replace-in-files but keep any Warning: lines so nothing real is lost.
+    "$REPLACE" "${passthrough_args[@]}" "$pattern" "$replacement" "${directories[@]}" \
+        2> >(grep -v '^\(Running in DRY-RUN mode\|Remove -d\)' >&2 || true)
+done
+
+printf "Done.\n" >&2
