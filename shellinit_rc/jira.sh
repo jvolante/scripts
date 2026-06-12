@@ -6,13 +6,15 @@
 # All functions read $JIRA_URL, $JIRA_PERSONAL_TOKEN, $JIRA_AUTH_TYPE
 #
 # Chaining examples:
-#   jira-query 'assignee = currentUser() AND status != Done' | jq -r '.key' | xargs -I{} jira-comments {}
-#   jira-query 'assignee = currentUser()' | jq -r '.key' | xargs -I{} jira-transitions {}
+#   jira-query 'assignee = currentUser() AND status != Done' | jq -r '.[].key' | xargs -I{} jira-comments {}
+#   jira-query 'assignee = currentUser()' | jq -r '.[].key' | xargs -I{} jira-transitions {}
 #   jira-issue PROJ-469 | jq '{key, summary, status}'
-#   jira-epics PROJ | jq -r '.key' | xargs -I{} jira-epic-issues {}
-#   jira-boards PROJ | jq -r '.id' | head -1 | xargs jira-sprints
-#   jira-sprints 42 --state active | jq -r '.id' | xargs jira-sprint-issues
+#   jira-epics PROJ | jq -r '.[].key'
+#   jira-epics PROJ | jq -r '.[].key' | xargs -I{} jira-epic-issues {}
+#   jira-boards PROJ | jq -r '.[].id' | head -1 | xargs jira-sprints
+#   jira-sprints 42 --state active | jq -r '.[].id' | xargs jira-sprint-issues
 #   jira-attachments PROJ-42 | jq -r '.[] | .content' | xargs -I{} jira-attachment-get {}
+#   jira-mine ISL | jq -r '.[] | .key + "\t" + .summary'
 # ---------------------------------------------------------------------------
 
 declare -f jira-curl > /dev/null 2>&1 && return
@@ -61,14 +63,14 @@ Examples:
     --data-urlencode "jql=${jql}" \
     --data-urlencode "maxResults=${max_results}" \
     --data-urlencode "fields=summary,status,assignee,priority,issuetype" \
-  | jq '.issues[] | {
+  | jq '[.issues[] | {
       key:      .key,
       type:     .fields.issuetype.name,
       summary:  .fields.summary,
       status:   .fields.status.name,
       priority: .fields.priority.name,
       assignee: .fields.assignee.displayName
-    }'
+    }]'
 }
 
 # Print full detail for a single issue
@@ -344,7 +346,7 @@ jira-unlink() {
 
 # List epics in a project (or $JIRA_PROJECTS if no project given).
 # Usage: jira-epics [project-key]
-# Chains: jira-epics PROJ | jq -r '.key'
+# Chains: jira-epics PROJ | jq -r '.[].key'
 jira-epics() {
   local project="${1:-}"
   local jql='issuetype = Epic'
@@ -361,18 +363,18 @@ jira-epics() {
     --data-urlencode "jql=${jql}" \
     --data-urlencode "maxResults=1000" \
     --data-urlencode "fields=summary,status,assignee,customfield_10102" \
-  | jq '.issues[] | {
+  | jq '[.issues[] | {
       key:        .key,
       epic_name:  .fields.customfield_10102,
       summary:    .fields.summary,
       status:     .fields.status.name,
       assignee:   .fields.assignee?.displayName
-    }'
+    }]'
 }
 
 # List issues belonging to an epic (classic Epic Link field).
 # Usage: jira-epic-issues <EPIC-KEY>
-# Chains: jira-epic-issues PROJ-100 | jq -r '.key'
+# Chains: jira-epic-issues PROJ-100 | jq -r '.[].key'
 jira-epic-issues() {
   if [[ $# -lt 1 ]]; then
     printf 'Usage: jira-epic-issues <EPIC-KEY>\n' >&2
@@ -384,14 +386,14 @@ jira-epic-issues() {
     --data-urlencode "jql=\"Epic Link\" = $1" \
     --data-urlencode "maxResults=1000" \
     --data-urlencode "fields=summary,status,assignee,priority,issuetype" \
-  | jq '.issues[] | {
+  | jq '[.issues[] | {
       key:      .key,
       type:     .fields.issuetype.name,
       summary:  .fields.summary,
       status:   .fields.status.name,
       priority: .fields.priority.name,
       assignee: .fields.assignee?.displayName
-    }'
+    }]'
 }
 
 # Set the epic for one or more issues (classic customfield_10100).
@@ -441,15 +443,15 @@ jira-epic-set() {
 
 # List all accessible projects.
 # Usage: jira-projects
-# Chains: jira-projects | jq -r 'select(.type=="software") | .key'
+# Chains: jira-projects | jq -r '.[] | select(.type=="software") | .key'
 jira-projects() {
   jira-curl "project" \
-  | jq '.[] | {
+  | jq '[.[] | {
       key:  .key,
       name: .name,
       type: .projectTypeKey,
       lead: .lead?.displayName
-    }'
+    }]'
 }
 
 # ---------------------------------------------------------------------------
@@ -505,7 +507,7 @@ jira-boards() {
 # List sprints for a board.
 # Usage: jira-sprints <board-id> [--state active|future|closed|all]
 # Default state: active,future
-# Chains: jira-sprints 42 --state active | jq -r '.id'
+# Chains: jira-sprints 42 --state active | jq -r '.[].id'
 jira-sprints() {
   if [[ $# -lt 1 ]]; then
     printf 'Usage: jira-sprints <board-id> [--state active|future|closed|all]\n' >&2
@@ -532,12 +534,12 @@ jira-sprints() {
     -G \
     --data-urlencode "maxResults=1000" \
     "${state_args[@]}" 2>/dev/null \
-  | jq '.values[] | {id, name, state, startDate, endDate}'
+  | jq '[.values[] | {id, name, state, startDate, endDate}]'
 }
 
 # List issues in a sprint.
 # Usage: jira-sprint-issues <sprint-id>
-# Chains: jira-sprint-issues 24836 | jq -r '.key'
+# Chains: jira-sprint-issues 24836 | jq -r '.[].key'
 jira-sprint-issues() {
   if [[ $# -lt 1 ]]; then
     printf 'Usage: jira-sprint-issues <sprint-id>\n' >&2
@@ -548,14 +550,14 @@ jira-sprint-issues() {
     --data-urlencode "maxResults=1000" \
     --data-urlencode "fields=summary,status,assignee,priority,issuetype" \
     2>/dev/null \
-  | jq '.issues[] | {
+  | jq '[.issues[] | {
       key:      .key,
       type:     .fields.issuetype.name,
       summary:  .fields.summary,
       status:   .fields.status.name,
       priority: .fields.priority?.name,
       assignee: .fields.assignee?.displayName
-    }'
+    }]'
 }
 
 # Add one or more issues to a sprint.
@@ -590,7 +592,7 @@ jira-versions() {
     return 1
   fi
   jira-curl "project/$1/versions" \
-  | jq '.[] | {id, name, released, releaseDate, archived}'
+  | jq '[.[] | {id, name, released, releaseDate, archived}]'
 }
 
 # Create a new version (release) in a project.
@@ -701,3 +703,54 @@ jira-attachment-get() {
 }
 
 # ---------------------------------------------------------------------------
+# Jira — convenience helpers
+# ---------------------------------------------------------------------------
+
+# List your own open (non-Done) tickets, optionally scoped to a project.
+# Falls back to $JIRA_PROJECTS if set and no argument is given.
+# Usage: jira-mine [PROJECT]
+# Examples:
+#   jira-mine
+#   jira-mine ISL
+#   jira-mine ISL | jq -r '.[] | .key + " " + .summary'
+jira-mine() {
+  local project="${1:-}"
+  local jql='assignee = currentUser() AND status != Done'
+
+  if [[ -n "$project" ]]; then
+    jql="${jql} AND project = ${project}"
+  elif [[ -n "${JIRA_PROJECTS:-}" ]]; then
+    jql="${jql} AND project in (${JIRA_PROJECTS})"
+  fi
+
+  jira-curl \
+    search \
+    -G \
+    --data-urlencode "jql=${jql}" \
+    --data-urlencode "maxResults=1000" \
+    --data-urlencode "fields=summary,status,assignee,priority,issuetype" \
+  | jq '[.issues[] | {
+      key:      .key,
+      type:     .fields.issuetype.name,
+      summary:  .fields.summary,
+      status:   .fields.status.name,
+      priority: .fields.priority.name,
+      assignee: .fields.assignee?.displayName
+    }]'
+}
+
+# Open a Jira issue in the default browser.
+# Usage: jira-open <KEY>
+# Example: jira-open ISL-1179
+jira-open() {
+  if [[ $# -lt 1 ]]; then
+    printf 'Usage: jira-open <KEY>\n' >&2
+    return 1
+  fi
+  local url="${JIRA_URL}/browse/$1"
+  if command -v xdg-open > /dev/null 2>&1; then
+    xdg-open "$url"
+  else
+    printf '%s\n' "$url"
+  fi
+}
