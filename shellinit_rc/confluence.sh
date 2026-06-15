@@ -44,7 +44,7 @@ confluence-search() {
     --data-urlencode "cql=${cql}" \
     --data-urlencode "limit=${limit}" \
     --data-urlencode "expand=space,version,ancestors" \
-  | jq '.results[] | {
+  | jq '[.results[] | {
       id:        .id,
       title:     .title,
       type:      .type,
@@ -52,7 +52,7 @@ confluence-search() {
       version:   .version.number,
       ancestors: [.ancestors[]?.title],
       url:       ._links.webui
-    }'
+    }]'
 }
 
 # Get full content of a page including body
@@ -73,6 +73,17 @@ confluence-page() {
       url:       ._links.webui,
       body:      .body.storage.value
     }'
+}
+
+# Get plain-text body of a page (HTML tags stripped)
+# Usage: confluence-page-text <page-id>
+# Chains: confluence-search '...' | jq -r '.[].id' | xargs -I{} confluence-page-text {}
+confluence-page-text() {
+  if [[ $# -lt 1 ]]; then
+    printf 'Usage: confluence-page-text <page-id>\n' >&2
+    return 1
+  fi
+  confluence-page "$1" | jq -r '.body | gsub("<[^>]+>"; " ") | gsub("\\s+"; " ") | ltrimstr(" ")'
 }
 
 # Get comments on a page
