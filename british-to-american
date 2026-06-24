@@ -3,12 +3,16 @@
 set -euo pipefail
 
 # Convert common British English spellings to Standard American English across
-# files in a directory tree.  All arguments are passed through to replace-in-files
-# before the mandatory <pattern> <replacement> <directories...> positional args,
-# so flags like -d (dry-run), -j (jobs), -b (backup), and -t (file type) all work.
+# files in a directory tree.  Uses ripgrep for file discovery and perl for
+# case-preserving in-place substitution.
+#
+# Replacements preserve the case of the original word:
+#   colour  → color
+#   Colour  → Color
+#   COLOUR  → COLOR
 #
 # Usage:
-#   british-to-american [REPLACE-IN-FILES OPTIONS] <directories...>
+#   british-to-american [OPTIONS] <directories...>
 #
 # Examples:
 #   british-to-american src/                   # apply in-place
@@ -16,22 +20,15 @@ set -euo pipefail
 #   british-to-american -j 4 -t py src/ lib/   # 4 jobs, Python files only
 #   british-to-american -b .bak src/           # backup before modifying
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-readonly REPLACE="${SCRIPT_DIR}/replace-in-files"
-
-if [[ ! -x "$REPLACE" ]]; then
-    printf "Error: replace-in-files not found or not executable at %s\n" "$REPLACE" >&2
-    exit 1
-fi
-
 usage() {
     cat <<EOF
-Usage: $(basename "$0") [REPLACE-IN-FILES OPTIONS] <directories...>
+Usage: $(basename "$0") [OPTIONS] <directories...>
 
 Replaces common British English spellings with American English equivalents
-across all text files in the given directories.
+across all text files in the given directories.  Replacements preserve the
+original word's case (lowercase, Title-case, or ALLCAPS).
 
-All OPTIONS are forwarded verbatim to replace-in-files:
+OPTIONS:
     -d, --dry-run       Show changes without modifying files
     -j, --jobs NUM      Max parallel jobs (default: nproc)
     -b, --backup EXT    Create backup files (e.g. -b .bak)
@@ -49,236 +46,610 @@ EOF
 
 # ---------------------------------------------------------------------------
 # Substitution table: (pattern, replacement) pairs.
-# Patterns use \b word-boundaries to avoid partial-word matches (e.g. "colour"
-# inside "discoloured" would still match — intentionally, since the suffix
-# itself carries the British spelling).  Case-insensitive flag (?i) is used so
-# that COLOUR, Colour, and colour are all handled; the replacement preserves
-# the lower-case American form and the pattern's capture group restores leading
-# capitalisation where needed.
+# Patterns use \b word-boundaries to avoid partial-word matches.  Each pattern
+# is a case-insensitive PCRE regex (Perl-compatible); the perl execution layer
+# uses a fix_case() helper to restore the original word's case in the
+# replacement (lowercase → lowercase, Title → Title, ALLCAPS → ALLCAPS).
 #
 # Format: alternating entries — even indices are patterns, odd are replacements.
-#
-# NOTE: ${1} tokens in the replacement strings are Rust regex back-references
-# consumed by `sd` — they are intentionally single-quoted to prevent the shell
-# from expanding them.
-# shellcheck disable=SC2016
+# All replacements are lowercase; fix_case() handles casing at runtime.
 # ---------------------------------------------------------------------------
 declare -a SUBSTITUTIONS=(
     # -our  →  -or
-    '(?i)\bcolour\b'            'color'
-    '(?i)\bcolours\b'           'colors'
-    '(?i)\bcoloured\b'          'colored'
-    '(?i)\bcolouring\b'         'coloring'
-    '(?i)\bcolourful\b'         'colorful'
-    '(?i)\bcolourless\b'        'colorless'
-    '(?i)\bflavour\b'           'flavor'
-    '(?i)\bflavours\b'          'flavors'
-    '(?i)\bflavoured\b'         'flavored'
-    '(?i)\bflavouring\b'        'flavoring'
-    '(?i)\bflavourful\b'        'flavorful'
-    '(?i)\bhonour\b'            'honor'
-    '(?i)\bhonours\b'           'honors'
-    '(?i)\bhonoured\b'          'honored'
-    '(?i)\bhonorable\b'         'honorable'
-    '(?i)\bhumour\b'            'humor'
-    '(?i)\bhumours\b'           'humors'
-    '(?i)\bhumoured\b'          'humored'
-    '(?i)\bhumouring\b'         'humoring'
-    '(?i)\bhumourous\b'         'humorous'
-    '(?i)\blabour\b'            'labor'
-    '(?i)\blabours\b'           'labors'
-    '(?i)\blaboured\b'          'labored'
-    '(?i)\blabouring\b'         'laboring'
-    '(?i)\blabourer\b'          'laborer'
-    '(?i)\blabourers\b'         'laborers'
-    '(?i)\bneighbour\b'         'neighbor'
-    '(?i)\bneighbours\b'        'neighbors'
-    '(?i)\bneighbourhood\b'     'neighborhood'
-    '(?i)\bneighbourhoods\b'    'neighborhoods'
-    '(?i)\bneighbouring\b'      'neighboring'
-    '(?i)\brumour\b'            'rumor'
-    '(?i)\brumours\b'           'rumors'
-    '(?i)\brumoured\b'          'rumored'
-    '(?i)\bvalour\b'            'valor'
-    '(?i)\bvigour\b'            'vigor'
+    '\bcolour\b'            'color'
+    '\bcolours\b'           'colors'
+    '\bcoloured\b'          'colored'
+    '\bcolouring\b'         'coloring'
+    '\bcolourful\b'         'colorful'
+    '\bcolourless\b'        'colorless'
+    '\bflavour\b'           'flavor'
+    '\bflavours\b'          'flavors'
+    '\bflavoured\b'         'flavored'
+    '\bflavouring\b'        'flavoring'
+    '\bflavourful\b'        'flavorful'
+    '\bhonour\b'            'honor'
+    '\bhonours\b'           'honors'
+    '\bhonoured\b'          'honored'
+    '\bhonorable\b'         'honorable'
+    '\bhumour\b'            'humor'
+    '\bhumours\b'           'humors'
+    '\bhumoured\b'          'humored'
+    '\bhumouring\b'         'humoring'
+    '\bhumourous\b'         'humorous'
+    '\blabour\b'            'labor'
+    '\blabours\b'           'labors'
+    '\blaboured\b'          'labored'
+    '\blabouring\b'         'laboring'
+    '\blabourer\b'          'laborer'
+    '\blabourers\b'         'laborers'
+    '\bneighbour\b'         'neighbor'
+    '\bneighbours\b'        'neighbors'
+    '\bneighbourhood\b'     'neighborhood'
+    '\bneighbourhoods\b'    'neighborhoods'
+    '\bneighbouring\b'      'neighboring'
+    '\brumour\b'            'rumor'
+    '\brumours\b'           'rumors'
+    '\brumoured\b'          'rumored'
+    '\bvalour\b'            'valor'
+    '\bvigour\b'            'vigor'
 
-    # -ise  →  -ize  (verb forms; ${1} tokens are Rust regex back-references for sd)
-    '(?i)\b(\w+)ise\b'          '${1}ize'
-    '(?i)\b(\w+)ised\b'         '${1}ized'
-    '(?i)\b(\w+)ises\b'         '${1}izes'
-    '(?i)\b(\w+)ising\b'        '${1}izing'
-    '(?i)\b(\w+)isation\b'      '${1}ization'
-    '(?i)\b(\w+)isations\b'     '${1}izations'
-    '(?i)\b(\w+)iser\b'         '${1}izer'
-    '(?i)\b(\w+)isers\b'        '${1}izers'
+    # -ise  →  -ize  (explicit allowlist of known British -ise spellings;
+    #                  avoids false positives on words like "otherwise",
+    #                  "surprise", "promise", "advise", "noise", etc.)
+    '\bacclimatise\b'       'acclimatize'
+    '\bacclimatised\b'      'acclimatized'
+    '\bacclimatises\b'      'acclimatizes'
+    '\bacclimatising\b'     'acclimatizing'
+    '\bacclimatisation\b'   'acclimatization'
+    '\bagonise\b'           'agonize'
+    '\bagonised\b'          'agonized'
+    '\bagonises\b'          'agonizes'
+    '\bagonising\b'         'agonizing'
+    '\balphabetise\b'       'alphabetize'
+    '\balphabetised\b'      'alphabetized'
+    '\balphabetises\b'      'alphabetizes'
+    '\balphabetising\b'     'alphabetizing'
+    '\bauthorise\b'         'authorize'
+    '\bauthorised\b'        'authorized'
+    '\bauthorises\b'        'authorizes'
+    '\bauthorising\b'       'authorizing'
+    '\bauthorisation\b'     'authorization'
+    '\bauthorisations\b'    'authorizations'
+    '\bbrutalise\b'         'brutalize'
+    '\bbrutalised\b'        'brutalized'
+    '\bbrutalises\b'        'brutalizes'
+    '\bbrutalising\b'       'brutalizing'
+    '\bcapitalise\b'        'capitalize'
+    '\bcapitalised\b'       'capitalized'
+    '\bcapitalises\b'       'capitalizes'
+    '\bcapitalising\b'      'capitalizing'
+    '\bcapitalisation\b'    'capitalization'
+    '\bcategorise\b'        'categorize'
+    '\bcategorised\b'       'categorized'
+    '\bcategorises\b'       'categorizes'
+    '\bcategorising\b'      'categorizing'
+    '\bcategorisation\b'    'categorization'
+    '\bcentralise\b'        'centralize'
+    '\bcentralised\b'       'centralized'
+    '\bcentralises\b'       'centralizes'
+    '\bcentralising\b'      'centralizing'
+    '\bcentralisation\b'    'centralization'
+    '\bcharacterise\b'      'characterize'
+    '\bcharacterised\b'     'characterized'
+    '\bcharacterises\b'     'characterizes'
+    '\bcharacterising\b'    'characterizing'
+    '\bcharacterisation\b'  'characterization'
+    '\bcircularise\b'       'circularize'
+    '\bcircularised\b'      'circularized'
+    '\bcircularises\b'      'circularizes'
+    '\bcircularising\b'     'circularizing'
+    '\bcivilise\b'          'civilize'
+    '\bcivilised\b'         'civilized'
+    '\bcivilises\b'         'civilizes'
+    '\bcivilising\b'        'civilizing'
+    '\bcivilisation\b'      'civilization'
+    '\bcivilisations\b'     'civilizations'
+    '\bcolonise\b'          'colonize'
+    '\bcolonised\b'         'colonized'
+    '\bcolonises\b'         'colonizes'
+    '\bcolonising\b'        'colonizing'
+    '\bcolonisation\b'      'colonization'
+    '\bcomputerise\b'       'computerize'
+    '\bcomputerised\b'      'computerized'
+    '\bcomputerises\b'      'computerizes'
+    '\bcomputerising\b'     'computerizing'
+    '\bcomputerisation\b'   'computerization'
+    '\bcriminalise\b'       'criminalize'
+    '\bcriminalised\b'      'criminalized'
+    '\bcriminalises\b'      'criminalizes'
+    '\bcriminalising\b'     'criminalizing'
+    '\bcriminalisation\b'   'criminalization'
+    '\bcriticise\b'         'criticize'
+    '\bcriticised\b'        'criticized'
+    '\bcriticises\b'        'criticizes'
+    '\bcriticising\b'       'criticizing'
+    '\bcustomise\b'         'customize'
+    '\bcustomised\b'        'customized'
+    '\bcustomises\b'        'customizes'
+    '\bcustomising\b'       'customizing'
+    '\bcustomisation\b'     'customization'
+    '\bdecentralise\b'      'decentralize'
+    '\bdecentralised\b'     'decentralized'
+    '\bdecentralises\b'     'decentralizes'
+    '\bdecentralising\b'    'decentralizing'
+    '\bdecentralisation\b'  'decentralization'
+    '\bdemocratise\b'       'democratize'
+    '\bdemocratised\b'      'democratized'
+    '\bdemocratises\b'      'democratizes'
+    '\bdemocratising\b'     'democratizing'
+    '\bdemocratisation\b'   'democratization'
+    '\bdemonise\b'          'demonize'
+    '\bdemonised\b'         'demonized'
+    '\bdemonises\b'         'demonizes'
+    '\bdemonising\b'        'demonizing'
+    '\bdeodorise\b'         'deodorize'
+    '\bdeodorised\b'        'deodorized'
+    '\bdeodorises\b'        'deodorizes'
+    '\bdeodorising\b'       'deodorizing'
+    '\bdigitalise\b'        'digitalize'
+    '\bdigitalised\b'       'digitalized'
+    '\bdigitalises\b'       'digitalizes'
+    '\bdigitalising\b'      'digitalizing'
+    '\bdigitalisation\b'    'digitalization'
+    '\bdisorganise\b'       'disorganize'
+    '\bdisorganised\b'      'disorganized'
+    '\bdisorganises\b'      'disorganizes'
+    '\bdisorganising\b'     'disorganizing'
+    '\bdramatise\b'         'dramatize'
+    '\bdramatised\b'        'dramatized'
+    '\bdramatises\b'        'dramatizes'
+    '\bdramatising\b'       'dramatizing'
+    '\bdramatisation\b'     'dramatization'
+    '\beconomise\b'         'economize'
+    '\beconomised\b'        'economized'
+    '\beconomises\b'        'economizes'
+    '\beconomising\b'       'economizing'
+    '\bemphasise\b'         'emphasize'
+    '\bemphasised\b'        'emphasized'
+    '\bemphasises\b'        'emphasizes'
+    '\bemphasising\b'       'emphasizing'
+    '\benergise\b'          'energize'
+    '\benergised\b'         'energized'
+    '\benergises\b'         'energizes'
+    '\benergising\b'        'energizing'
+    '\beuthanise\b'         'euthanize'
+    '\beuthanised\b'        'euthanized'
+    '\beuthanises\b'        'euthanizes'
+    '\beuthanising\b'       'euthanizing'
+    '\bfinalise\b'          'finalize'
+    '\bfinalised\b'         'finalized'
+    '\bfinalises\b'         'finalizes'
+    '\bfinalising\b'        'finalizing'
+    '\bformalise\b'         'formalize'
+    '\bformalised\b'        'formalized'
+    '\bformalises\b'        'formalizes'
+    '\bformalising\b'       'formalizing'
+    '\bformalisation\b'     'formalization'
+    '\bgeneralise\b'        'generalize'
+    '\bgeneralised\b'       'generalized'
+    '\bgeneralises\b'       'generalizes'
+    '\bgeneralising\b'      'generalizing'
+    '\bgeneralisation\b'    'generalization'
+    '\bglobalise\b'         'globalize'
+    '\bglobalised\b'        'globalized'
+    '\bglobalises\b'        'globalizes'
+    '\bglobalising\b'       'globalizing'
+    '\bglobalisation\b'     'globalization'
+    '\bharmonise\b'         'harmonize'
+    '\bharmonised\b'        'harmonized'
+    '\bharmonises\b'        'harmonizes'
+    '\bharmonising\b'       'harmonizing'
+    '\bharmonisation\b'     'harmonization'
+    '\bhospitalise\b'       'hospitalize'
+    '\bhospitalised\b'      'hospitalized'
+    '\bhospitalises\b'      'hospitalizes'
+    '\bhospitalising\b'     'hospitalizing'
+    '\bhypnotise\b'         'hypnotize'
+    '\bhypnotised\b'        'hypnotized'
+    '\bhypnotises\b'        'hypnotizes'
+    '\bhypnotising\b'       'hypnotizing'
+    '\bidealise\b'          'idealize'
+    '\bidealised\b'         'idealized'
+    '\bidealises\b'         'idealizes'
+    '\bidealising\b'        'idealizing'
+    '\bimmobilise\b'        'immobilize'
+    '\bimmobilised\b'       'immobilized'
+    '\bimmobilises\b'       'immobilizes'
+    '\bimmobilising\b'      'immobilizing'
+    '\bimmobilisation\b'    'immobilization'
+    '\bimmortalise\b'       'immortalize'
+    '\bimmortalised\b'      'immortalized'
+    '\bimmortalises\b'      'immortalizes'
+    '\bimmortalising\b'     'immortalizing'
+    '\bindividualise\b'     'individualize'
+    '\bindividualised\b'    'individualized'
+    '\bindividualises\b'    'individualizes'
+    '\bindividualising\b'   'individualizing'
+    '\bindividualisation\b' 'individualization'
+    '\bindustrialise\b'     'industrialize'
+    '\bindustrialised\b'    'industrialized'
+    '\bindustrialises\b'    'industrializes'
+    '\bindustrialising\b'   'industrializing'
+    '\bindustrialisation\b' 'industrialization'
+    '\binitialise\b'        'initialize'
+    '\binitialised\b'       'initialized'
+    '\binitialises\b'       'initializes'
+    '\binitialising\b'      'initializing'
+    '\binitialisation\b'    'initialization'
+    '\binstitutionalise\b'  'institutionalize'
+    '\binstitutionalised\b' 'institutionalized'
+    '\binstitutionalises\b' 'institutionalizes'
+    '\binstitutionalising\b' 'institutionalizing'
+    '\binstitutionalisation\b' 'institutionalization'
+    '\binternationalise\b'  'internationalize'
+    '\binternationalised\b' 'internationalized'
+    '\binternationalises\b' 'internationalizes'
+    '\binternationalising\b' 'internationalizing'
+    '\binternationalisation\b' 'internationalization'
+    '\blegalise\b'          'legalize'
+    '\blegalised\b'         'legalized'
+    '\blegalises\b'         'legalizes'
+    '\blegalising\b'        'legalizing'
+    '\blegalisation\b'      'legalization'
+    '\bliberalise\b'        'liberalize'
+    '\bliberalised\b'       'liberalized'
+    '\bliberalises\b'       'liberalizes'
+    '\bliberalising\b'      'liberalizing'
+    '\bliberalisation\b'    'liberalization'
+    '\blocalise\b'          'localize'
+    '\blocalised\b'         'localized'
+    '\blocalises\b'         'localizes'
+    '\blocalising\b'        'localizing'
+    '\blocalisation\b'      'localization'
+    '\bmaximise\b'          'maximize'
+    '\bmaximised\b'         'maximized'
+    '\bmaximises\b'         'maximizes'
+    '\bmaximising\b'        'maximizing'
+    '\bmemorise\b'          'memorize'
+    '\bmemorised\b'         'memorized'
+    '\bmemorises\b'         'memorizes'
+    '\bmemorising\b'        'memorizing'
+    '\bmemorisation\b'      'memorization'
+    '\bminimise\b'          'minimize'
+    '\bminimised\b'         'minimized'
+    '\bminimises\b'         'minimizes'
+    '\bminimising\b'        'minimizing'
+    '\bmoralise\b'          'moralize'
+    '\bmoralised\b'         'moralized'
+    '\bmoralises\b'         'moralizes'
+    '\bmoralising\b'        'moralizing'
+    '\bmodernise\b'         'modernize'
+    '\bmodernised\b'        'modernized'
+    '\bmodernises\b'        'modernizes'
+    '\bmodernising\b'       'modernizing'
+    '\bmodernisation\b'     'modernization'
+    '\bnationalise\b'       'nationalize'
+    '\bnationalised\b'      'nationalized'
+    '\bnationalises\b'      'nationalizes'
+    '\bnationalising\b'     'nationalizing'
+    '\bnationalisation\b'   'nationalization'
+    '\bnormalise\b'         'normalize'
+    '\bnormalised\b'        'normalized'
+    '\bnormalises\b'        'normalizes'
+    '\bnormalising\b'       'normalizing'
+    '\bnormalisation\b'     'normalization'
+    '\boptimise\b'          'optimize'
+    '\boptimised\b'         'optimized'
+    '\boptimises\b'         'optimizes'
+    '\boptimising\b'        'optimizing'
+    '\boptimisation\b'      'optimization'
+    '\borganise\b'          'organize'
+    '\borganised\b'         'organized'
+    '\borganises\b'         'organizes'
+    '\borganising\b'        'organizing'
+    '\borganisation\b'      'organization'
+    '\borganisations\b'     'organizations'
+    '\borganiser\b'         'organizer'
+    '\borganisers\b'        'organizers'
+    '\bpasteurise\b'        'pasteurize'
+    '\bpasteurised\b'       'pasteurized'
+    '\bpasteurises\b'       'pasteurizes'
+    '\bpasteurising\b'      'pasteurizing'
+    '\bpasteurisation\b'    'pasteurization'
+    '\bpersonalise\b'       'personalize'
+    '\bpersonalised\b'      'personalized'
+    '\bpersonalises\b'      'personalizes'
+    '\bpersonalising\b'     'personalizing'
+    '\bpersonalisation\b'   'personalization'
+    '\bpolarise\b'          'polarize'
+    '\bpolarised\b'         'polarized'
+    '\bpolarises\b'         'polarizes'
+    '\bpolarising\b'        'polarizing'
+    '\bpolarisation\b'      'polarization'
+    '\bpopularise\b'        'popularize'
+    '\bpopularised\b'       'popularized'
+    '\bpopularises\b'       'popularizes'
+    '\bpopularising\b'      'popularizing'
+    '\bpopularisation\b'    'popularization'
+    '\bprioritise\b'        'prioritize'
+    '\bprioritised\b'       'prioritized'
+    '\bprioritises\b'       'prioritizes'
+    '\bprioritising\b'      'prioritizing'
+    '\bprioritisation\b'    'prioritization'
+    '\bprivatise\b'         'privatize'
+    '\bprivatised\b'        'privatized'
+    '\bprivatises\b'        'privatizes'
+    '\bprivatising\b'       'privatizing'
+    '\bprivatisation\b'     'privatization'
+    '\bprofessionalise\b'   'professionalize'
+    '\bprofessionalised\b'  'professionalized'
+    '\bprofessionalises\b'  'professionalizes'
+    '\bprofessionalising\b' 'professionalizing'
+    '\bprofessionalisation\b' 'professionalization'
+    '\brationalise\b'       'rationalize'
+    '\brationalised\b'      'rationalized'
+    '\brationalises\b'      'rationalizes'
+    '\brationalising\b'     'rationalizing'
+    '\brationalisation\b'   'rationalization'
+    '\brealise\b'           'realize'
+    '\brealised\b'          'realized'
+    '\brealises\b'          'realizes'
+    '\brealising\b'         'realizing'
+    '\brealisation\b'       'realization'
+    '\brecognise\b'         'recognize'
+    '\brecognised\b'        'recognized'
+    '\brecognises\b'        'recognizes'
+    '\brecognising\b'       'recognizing'
+    '\brecognisable\b'      'recognizable'
+    '\brecognisably\b'      'recognizably'
+    '\breorganise\b'        'reorganize'
+    '\breorganised\b'       'reorganized'
+    '\breorganises\b'       'reorganizes'
+    '\breorganising\b'      'reorganizing'
+    '\breorganisation\b'    'reorganization'
+    '\bserialise\b'         'serialize'
+    '\bserialised\b'        'serialized'
+    '\bserialises\b'        'serializes'
+    '\bserialising\b'       'serializing'
+    '\bserialisation\b'     'serialization'
+    '\bsocialise\b'         'socialize'
+    '\bsocialised\b'        'socialized'
+    '\bsocialises\b'        'socializes'
+    '\bsocialising\b'       'socializing'
+    '\bsocialisation\b'     'socialization'
+    '\bspecialise\b'        'specialize'
+    '\bspecialised\b'       'specialized'
+    '\bspecialises\b'       'specializes'
+    '\bspecialising\b'      'specializing'
+    '\bspecialisation\b'    'specialization'
+    '\bstabilise\b'         'stabilize'
+    '\bstabilised\b'        'stabilized'
+    '\bstabilises\b'        'stabilizes'
+    '\bstabilising\b'       'stabilizing'
+    '\bstabilisation\b'     'stabilization'
+    '\bstandardise\b'       'standardize'
+    '\bstandardised\b'      'standardized'
+    '\bstandardises\b'      'standardizes'
+    '\bstandardising\b'     'standardizing'
+    '\bstandardisation\b'   'standardization'
+    '\bsymbolise\b'         'symbolize'
+    '\bsymbolised\b'        'symbolized'
+    '\bsymbolises\b'        'symbolizes'
+    '\bsymbolising\b'       'symbolizing'
+    '\bsymbolisation\b'     'symbolization'
+    '\bsynthesise\b'        'synthesize'
+    '\bsynthesised\b'       'synthesized'
+    '\bsynthesises\b'       'synthesizes'
+    '\bsynthesising\b'      'synthesizing'
+    '\bsynthesiser\b'       'synthesizer'
+    '\bsynthesisers\b'      'synthesizers'
+    '\bterrorise\b'         'terrorize'
+    '\bterrorised\b'        'terrorized'
+    '\bterrorises\b'        'terrorizes'
+    '\bterrorising\b'       'terrorizing'
+    '\bthermalise\b'        'thermalize'
+    '\bthermalised\b'       'thermalized'
+    '\bthermalises\b'       'thermalizes'
+    '\bthermalising\b'      'thermalizing'
+    '\bvaporise\b'          'vaporize'
+    '\bvaporised\b'         'vaporized'
+    '\bvaporises\b'         'vaporizes'
+    '\bvaporising\b'        'vaporizing'
+    '\bvaporisation\b'      'vaporization'
+    '\bvictimise\b'         'victimize'
+    '\bvictimised\b'        'victimized'
+    '\bvictimises\b'        'victimizes'
+    '\bvictimising\b'       'victimizing'
+    '\bvictimisation\b'     'victimization'
+    '\bvisualise\b'         'visualize'
+    '\bvisualised\b'        'visualized'
+    '\bvisualises\b'        'visualizes'
+    '\bvisualising\b'       'visualizing'
+    '\bvisualisation\b'     'visualization'
+    '\bvocalise\b'          'vocalize'
+    '\bvocalised\b'         'vocalized'
+    '\bvocalises\b'         'vocalizes'
+    '\bvocalising\b'        'vocalizing'
 
     # -yse  →  -yze  (analyse, paralyse, etc.)
-    '(?i)\b(\w+)yse\b'          '${1}yze'
-    '(?i)\b(\w+)ysed\b'         '${1}yzed'
-    '(?i)\b(\w+)yses\b'         '${1}yzes'
-    '(?i)\b(\w+)ysing\b'        '${1}yzing'
+    '\banalyse\b'           'analyze'
+    '\banalysed\b'          'analyzed'
+    '\banalyses\b'          'analyzes'
+    '\banalysing\b'         'analyzing'
+    '\banalyser\b'          'analyzer'
+    '\banalysers\b'         'analyzers'
+    '\bcatalyse\b'          'catalyze'
+    '\bcatalysed\b'         'catalyzed'
+    '\bcatalyses\b'         'catalyzes'
+    '\bcatalysing\b'        'catalyzing'
+    '\belectrolyse\b'       'electrolyze'
+    '\belectrolysed\b'      'electrolyzed'
+    '\belectrolyses\b'      'electrolyzes'
+    '\belectrolysing\b'     'electrolyzing'
+    '\bhydrolyse\b'         'hydrolyze'
+    '\bhydrolysed\b'        'hydrolyzed'
+    '\bhydrolyses\b'        'hydrolyzes'
+    '\bhydrolysing\b'       'hydrolyzing'
+    '\bparalyse\b'          'paralyze'
+    '\bparalysed\b'         'paralyzed'
+    '\bparalyses\b'         'paralyzes'
+    '\bparalysing\b'        'paralyzing'
 
     # -re  →  -er  (specific common words — avoids false positives on e.g. "ore")
-    '(?i)\bcentre\b'            'center'
-    '(?i)\bcentres\b'           'centers'
-    '(?i)\bfibre\b'             'fiber'
-    '(?i)\bfibres\b'            'fibers'
-    '(?i)\blitre\b'             'liter'
-    '(?i)\blitres\b'            'liters'
-    '(?i)\bmetre\b'             'meter'
-    '(?i)\bmetres\b'            'meters'
-    '(?i)\bsepulchre\b'         'sepulcher'
-    '(?i)\bspectre\b'           'specter'
-    '(?i)\bspectres\b'          'specters'
-    '(?i)\btheatre\b'           'theater'
-    '(?i)\btheatres\b'          'theaters'
+    '\bcentre\b'            'center'
+    '\bcentres\b'           'centers'
+    '\bfibre\b'             'fiber'
+    '\bfibres\b'            'fibers'
+    '\blitre\b'             'liter'
+    '\blitres\b'            'liters'
+    '\bmetre\b'             'meter'
+    '\bmetres\b'            'meters'
+    '\bsepulchre\b'         'sepulcher'
+    '\bspectre\b'           'specter'
+    '\bspectres\b'          'specters'
+    '\btheatre\b'           'theater'
+    '\btheatres\b'          'theaters'
 
     # Doubled-l British forms  →  single-l American forms
-    '(?i)\bcancelled\b'         'canceled'
-    '(?i)\bcancelling\b'        'canceling'
-    '(?i)\bcancellation\b'      'cancelation'
-    '(?i)\bcancellations\b'     'cancelations'
-    '(?i)\bcounselled\b'        'counseled'
-    '(?i)\bcounselling\b'       'counseling'
-    '(?i)\bcounsellor\b'        'counselor'
-    '(?i)\bcounsellors\b'       'counselors'
-    '(?i)\benrolment\b'         'enrollment'
-    '(?i)\bfulfil\b'            'fulfill'
-    '(?i)\bfulfils\b'           'fulfills'
-    '(?i)\bfulfilment\b'        'fulfillment'
-    '(?i)\bjewellery\b'         'jewelry'
-    '(?i)\blabelled\b'          'labeled'
-    '(?i)\blabelling\b'         'labeling'
-    '(?i)\blabeller\b'          'labeler'
-    '(?i)\blevelled\b'          'leveled'
-    '(?i)\blevelling\b'         'leveling'
-    '(?i)\bmodelled\b'          'modeled'
-    '(?i)\bmodelling\b'         'modeling'
-    '(?i)\bmodeller\b'          'modeler'
-    '(?i)\bmodellers\b'         'modelers'
-    '(?i)\bravelled\b'          'raveled'
-    '(?i)\bravelling\b'         'raveling'
-    '(?i)\bsignalled\b'         'signaled'
-    '(?i)\bsignalling\b'        'signaling'
-    '(?i)\btravelled\b'         'traveled'
-    '(?i)\btravelling\b'        'traveling'
-    '(?i)\btraveller\b'         'traveler'
-    '(?i)\btravellers\b'        'travelers'
-    '(?i)\bwilful\b'            'willful'
-    '(?i)\bwilfully\b'          'willfully'
+    '\bcancelled\b'         'canceled'
+    '\bcancelling\b'        'canceling'
+    '\bcounselled\b'        'counseled'
+    '\bcounselling\b'       'counseling'
+    '\bcounsellor\b'        'counselor'
+    '\bcounsellors\b'       'counselors'
+    '\benrolment\b'         'enrollment'
+    '\bfulfil\b'            'fulfill'
+    '\bfulfils\b'           'fulfills'
+    '\bfulfilment\b'        'fulfillment'
+    '\bjewellery\b'         'jewelry'
+    '\blabelled\b'          'labeled'
+    '\blabelling\b'         'labeling'
+    '\blabeller\b'          'labeler'
+    '\blevelled\b'          'leveled'
+    '\blevelling\b'         'leveling'
+    '\bmodelled\b'          'modeled'
+    '\bmodelling\b'         'modeling'
+    '\bmodeller\b'          'modeler'
+    '\bmodellers\b'         'modelers'
+    '\bravelled\b'          'raveled'
+    '\bravelling\b'         'raveling'
+    '\bsignalled\b'         'signaled'
+    '\bsignalling\b'        'signaling'
+    '\btravelled\b'         'traveled'
+    '\btravelling\b'        'traveling'
+    '\btraveller\b'         'traveler'
+    '\btravellers\b'        'travelers'
+    '\bwilful\b'            'willful'
+    '\bwilfully\b'          'willfully'
 
-    # -ogue  →  -og
-    '(?i)\bcatalogue\b'         'catalog'
-    '(?i)\bcatalogues\b'        'catalogs'
-    '(?i)\bdialogue\b'          'dialog'
-    '(?i)\bdialogues\b'         'dialogs'
-    '(?i)\bmonologue\b'         'monolog'
-    '(?i)\bprologue\b'          'prolog'
-    '(?i)\bepilogue\b'          'epilog'
+    # -ogue  →  -og  (catalogue/dialog are genuine American variants;
+    #                  monologue/prologue/epilogue are already standard American)
+    '\bcatalogue\b'         'catalog'
+    '\bcatalogues\b'        'catalogs'
+    '\bdialogue\b'          'dialog'
+    '\bdialogues\b'         'dialogs'
 
     # -amme  →  -am  (programme)
-    '(?i)\bprogramme\b'         'program'
-    '(?i)\bprogrammes\b'        'programs'
+    '\bprogramme\b'         'program'
+    '\bprogrammes\b'        'programs'
 
     # Miscellaneous
-    '(?i)\banaemia\b'           'anemia'
-    '(?i)\baeroplane\b'         'airplane'
-    '(?i)\baeroplanes\b'        'airplanes'
-    '(?i)\baesthetic\b'         'esthetic'
-    '(?i)\baesthetics\b'        'esthetics'
-    '(?i)\baesthetically\b'     'esthetically'
-    '(?i)\banaesthetic\b'       'anesthetic'
-    '(?i)\banaesthetics\b'      'anesthetics'
-    '(?i)\bbehaviour\b'         'behavior'
-    '(?i)\bbehaviours\b'        'behaviors'
-    '(?i)\bbehavioural\b'       'behavioral'
-    '(?i)\bcheque\b'            'check'
-    '(?i)\bcheques\b'           'checks'
-    '(?i)\bdefence\b'           'defense'
-    '(?i)\bdefences\b'          'defenses'
-    '(?i)\bdefenceless\b'       'defenseless'
-    '(?i)\bdraught\b'           'draft'
-    '(?i)\bdraughts\b'          'drafts'
-    '(?i)\bdraughty\b'          'drafty'
-    '(?i)\benquire\b'           'inquire'
-    '(?i)\benquired\b'          'inquired'
-    '(?i)\benquires\b'          'inquires'
-    '(?i)\benquiring\b'         'inquiring'
-    '(?i)\benquiry\b'           'inquiry'
-    '(?i)\benquiries\b'         'inquiries'
-    '(?i)\bfavourite\b'         'favorite'
-    '(?i)\bfavourites\b'        'favorites'
-    '(?i)\bfoetus\b'            'fetus'
-    '(?i)\bgaol\b'              'jail'
-    '(?i)\bgrey\b'              'gray'
-    '(?i)\bgreys\b'             'grays'
-    '(?i)\bgreyed\b'            'grayed'
-    '(?i)\bgreying\b'           'graying'
-    '(?i)\bgreyish\b'           'grayish'
-    '(?i)\bgynaecology\b'       'gynecology'
-    '(?i)\bgynaecocological\b'  'gynecological'
-    '(?i)\bgynaecologist\b'     'gynecologist'
-    '(?i)\bgynaecologists\b'    'gynecologists'
-    '(?i)\bhaemoglobin\b'       'hemoglobin'
-    '(?i)\bhaemorrhage\b'       'hemorrhage'
-    '(?i)\bhaemorrhages\b'      'hemorrhages'
-    '(?i)\bhomologue\b'         'homolog'
-    '(?i)\bhomologues\b'        'homologs'
-    '(?i)\binstalment\b'        'installment'
-    '(?i)\binstalments\b'       'installments'
-    '(?i)\bleukaemia\b'         'leukemia'
-    '(?i)\blicence\b'           'license'
-    '(?i)\blicences\b'          'licenses'
-    '(?i)\bmanoeuvre\b'         'maneuver'
-    '(?i)\bmanoeuvres\b'        'maneuvers'
-    '(?i)\bmanoeuvred\b'        'maneuvered'
-    '(?i)\bmanoeuvring\b'       'maneuvering'
-    '(?i)\bmould\b'             'mold'
-    '(?i)\bmoulds\b'            'molds'
-    '(?i)\bmoulded\b'           'molded'
-    '(?i)\bmoulding\b'          'molding'
-    '(?i)\bmouldy\b'            'moldy'
-    '(?i)\bmoult\b'             'molt'
-    '(?i)\bmoults\b'            'molts'
-    '(?i)\bmoulting\b'          'molting'
-    '(?i)\boestrogen\b'         'estrogen'
-    '(?i)\boffence\b'           'offense'
-    '(?i)\boffences\b'          'offenses'
-    '(?i)\bpaediatric\b'        'pediatric'
-    '(?i)\bpaediatrics\b'       'pediatrics'
-    '(?i)\bpaediatrician\b'     'pediatrician'
-    '(?i)\bpaediatricians\b'    'pediatricians'
-    '(?i)\bpractise\b'          'practice'
-    '(?i)\bpractised\b'         'practiced'
-    '(?i)\bpractises\b'         'practices'
-    '(?i)\bpractising\b'        'practicing'
-    '(?i)\bpretence\b'          'pretense'
-    '(?i)\bpretences\b'         'pretenses'
-    '(?i)\bpyjamas\b'           'pajamas'
-    '(?i)\bsceptic\b'           'skeptic'
-    '(?i)\bsceptics\b'          'skeptics'
-    '(?i)\bsceptical\b'         'skeptical'
-    '(?i)\bscepticism\b'        'skepticism'
-    '(?i)\bsmoulder\b'          'smolder'
-    '(?i)\bsmouldering\b'       'smoldering'
-    '(?i)\bsulphur\b'           'sulfur'
-    '(?i)\bsulphate\b'          'sulfate'
-    '(?i)\bsulphide\b'          'sulfide'
-    '(?i)\bsulphuric\b'         'sulfuric'
-    '(?i)\bstorey\b'            'story'
-    '(?i)\bstoreys\b'           'stories'
-    '(?i)\btyre\b'              'tire'
-    '(?i)\btyres\b'             'tires'
-    '(?i)\bwoollen\b'           'woolen'
-    '(?i)\bwoollens\b'          'woolens'
-    '(?i)\bwoolly\b'            'wooly'
+    '\banaemia\b'           'anemia'
+    '\baeroplane\b'         'airplane'
+    '\baeroplanes\b'        'airplanes'
+    '\banaesthetic\b'       'anesthetic'
+    '\banaesthetics\b'      'anesthetics'
+    '\bbehaviour\b'         'behavior'
+    '\bbehaviours\b'        'behaviors'
+    '\bbehavioural\b'       'behavioral'
+    '\bcheque\b'            'check'
+    '\bcheques\b'           'checks'
+    '\bdefence\b'           'defense'
+    '\bdefences\b'          'defenses'
+    '\bdefenceless\b'       'defenseless'
+    '\bdraught\b'           'draft'
+    '\bdraughts\b'          'drafts'
+    '\bdraughty\b'          'drafty'
+    '\benquire\b'           'inquire'
+    '\benquired\b'          'inquired'
+    '\benquires\b'          'inquires'
+    '\benquiring\b'         'inquiring'
+    '\benquiry\b'           'inquiry'
+    '\benquiries\b'         'inquiries'
+    '\bfavourite\b'         'favorite'
+    '\bfavourites\b'        'favorites'
+    '\bfoetus\b'            'fetus'
+    '\bgaol\b'              'jail'
+    '\bgrey\b'              'gray'
+    '\bgreys\b'             'grays'
+    '\bgreyed\b'            'grayed'
+    '\bgreying\b'           'graying'
+    '\bgreyish\b'           'grayish'
+    '\bgynaecology\b'       'gynecology'
+    '\bgynaecocological\b'  'gynecological'
+    '\bgynaecologist\b'     'gynecologist'
+    '\bgynaecologists\b'    'gynecologists'
+    '\bhaemoglobin\b'       'hemoglobin'
+    '\bhaemorrhage\b'       'hemorrhage'
+    '\bhaemorrhages\b'      'hemorrhages'
+    '\bhomologue\b'         'homolog'
+    '\bhomologues\b'        'homologs'
+    '\binstalment\b'        'installment'
+    '\binstalments\b'       'installments'
+    '\bleukaemia\b'         'leukemia'
+    '\blicence\b'           'license'
+    '\blicences\b'          'licenses'
+    '\bmanoeuvre\b'         'maneuver'
+    '\bmanoeuvres\b'        'maneuvers'
+    '\bmanoeuvred\b'        'maneuvered'
+    '\bmanoeuvring\b'       'maneuvering'
+    '\bmould\b'             'mold'
+    '\bmoulds\b'            'molds'
+    '\bmoulded\b'           'molded'
+    '\bmoulding\b'          'molding'
+    '\bmouldy\b'            'moldy'
+    '\bmoult\b'             'molt'
+    '\bmoults\b'            'molts'
+    '\bmoulting\b'          'molting'
+    '\boestrogen\b'         'estrogen'
+    '\boffence\b'           'offense'
+    '\boffences\b'          'offenses'
+    '\bpaediatric\b'        'pediatric'
+    '\bpaediatrics\b'       'pediatrics'
+    '\bpaediatrician\b'     'pediatrician'
+    '\bpaediatricians\b'    'pediatricians'
+    '\bpractise\b'          'practice'
+    '\bpractised\b'         'practiced'
+    '\bpractises\b'         'practices'
+    '\bpractising\b'        'practicing'
+    '\bpretence\b'          'pretense'
+    '\bpretences\b'         'pretenses'
+    '\bpyjamas\b'           'pajamas'
+    '\bsceptic\b'           'skeptic'
+    '\bsceptics\b'          'skeptics'
+    '\bsceptical\b'         'skeptical'
+    '\bscepticism\b'        'skepticism'
+    '\bsmoulder\b'          'smolder'
+    '\bsmouldering\b'       'smoldering'
+    '\bsulphur\b'           'sulfur'
+    '\bsulphate\b'          'sulfate'
+    '\bsulphide\b'          'sulfide'
+    '\bsulphuric\b'         'sulfuric'
+    '\bstorey\b'            'story'
+    '\bstoreys\b'           'stories'
+    '\btyre\b'              'tire'
+    '\btyres\b'             'tires'
+    '\bwoollen\b'           'woolen'
+    '\bwoollens\b'          'woolens'
 )
 
 # ---------------------------------------------------------------------------
-# Argument parsing: collect replace-in-files flags (everything before the
-# first non-flag argument) and the trailing directory list.
+# Argument parsing
 # ---------------------------------------------------------------------------
-passthrough_args=()
+types=()
+dry_run=0
+parallel_jobs=""
+backup_ext=""
 directories=()
 
 while [[ $# -gt 0 ]]; do
@@ -286,18 +657,32 @@ while [[ $# -gt 0 ]]; do
         -h|--help)
             usage
             ;;
-        # Flags that consume the next token
-        -j|--jobs|-b|--backup|-t|--type)
+        -j|--jobs)
             if [[ -z "${2:-}" ]]; then
                 printf "Error: %s requires an argument\n" "$1" >&2
                 exit 1
             fi
-            passthrough_args+=("$1" "$2")
+            parallel_jobs="$2"
             shift 2
             ;;
-        # Boolean flags
+        -b|--backup)
+            if [[ -z "${2:-}" ]]; then
+                printf "Error: %s requires an argument\n" "$1" >&2
+                exit 1
+            fi
+            backup_ext="$2"
+            shift 2
+            ;;
+        -t|--type)
+            if [[ -z "${2:-}" ]]; then
+                printf "Error: %s requires an argument\n" "$1" >&2
+                exit 1
+            fi
+            types+=("$2")
+            shift 2
+            ;;
         -d|--dry-run)
-            passthrough_args+=("$1")
+            dry_run=1
             shift
             ;;
         -*)
@@ -327,7 +712,15 @@ for dir in "${directories[@]}"; do
 done
 
 # ---------------------------------------------------------------------------
-# Run each substitution pair.
+# Build a single perl inline script from the SUBSTITUTIONS table.
+#
+# Each pair (pattern, replacement) becomes one substitution statement:
+#   s/\bpattern\b/fix_case($&, "replacement")/gi
+#
+# fix_case() preserves the case of the matched word:
+#   - ALL-CAPS match  → ALL-CAPS replacement
+#   - Title-case match → Title-case replacement
+#   - lowercase match  → lowercase replacement  (default)
 # ---------------------------------------------------------------------------
 assert_even_substitutions() {
     local count=${#SUBSTITUTIONS[@]}
@@ -338,31 +731,105 @@ assert_even_substitutions() {
 }
 assert_even_substitutions
 
+build_perl_script() {
+    # shellcheck disable=SC2016  # Single quotes intentional: $ tokens are perl, not shell
+    printf 'sub fix_case {\n'
+    # shellcheck disable=SC2016
+    printf '    my ($matched, $rep) = @_;\n'
+    # shellcheck disable=SC2016
+    printf '    return uc($rep)     if $matched eq uc($matched);\n'
+    # shellcheck disable=SC2016
+    printf '    return ucfirst($rep) if length($matched) > 1\n'
+    # shellcheck disable=SC2016
+    printf '        && substr($matched, 0, 1) eq uc(substr($matched, 0, 1))\n'
+    # shellcheck disable=SC2016
+    printf '        && substr($matched, 1)    eq lc(substr($matched, 1));\n'
+    # shellcheck disable=SC2016
+    printf '    return $rep;\n'
+    printf '}\n'
+    for (( i = 0; i < ${#SUBSTITUTIONS[@]}; i += 2 )); do
+        local pat="${SUBSTITUTIONS[$i]}"
+        local rep="${SUBSTITUTIONS[$((i + 1))]}"
+        # Escape any double-quotes or backslashes in the replacement string so
+        # it is safe to embed inside a double-quoted Perl string literal.
+        local rep_escaped="${rep//\\/\\\\}"
+        rep_escaped="${rep_escaped//\"/\\\"}"
+        printf 's/%s/fix_case($&, "%s")/gie;\n' "$pat" "$rep_escaped"
+    done
+}
+
+PERL_SCRIPT="$(build_perl_script)"
+readonly PERL_SCRIPT
+
+# Build ripgrep file-discovery command.
+rg_cmd=(rg --files)
+for t in "${types[@]}"; do
+    rg_cmd+=(-t "$t")
+done
+rg_cmd+=("${directories[@]}")
+
+if [[ -z "$parallel_jobs" ]]; then
+    parallel_jobs=$(nproc)
+fi
+
 total=$(( ${#SUBSTITUTIONS[@]} / 2 ))
 printf "Applying %d British→American substitution rules...\n" "$total" >&2
 
-# Determine whether we are in dry-run mode so we can emit one banner instead
-# of one per rule.
-is_dry_run=0
-for arg in "${passthrough_args[@]}"; do
-    if [[ "$arg" == "-d" || "$arg" == "--dry-run" ]]; then
-        is_dry_run=1
-        break
-    fi
-done
+# ---------------------------------------------------------------------------
+# Process a single file: apply all substitutions in one perl pass.
+# ---------------------------------------------------------------------------
+process_file() {
+    local file="$1"
 
-if [[ "$is_dry_run" -eq 1 ]]; then
+    if [[ "$dry_run" -eq 1 ]]; then
+        local transformed rel_file diff_out output
+        transformed=$(perl -pe "$PERL_SCRIPT" -- "$file" 2>/dev/null) || {
+            printf "Warning: Failed to process %s\n" "$file" >&2
+            return 1
+        }
+        if [[ "$transformed" != "$(cat "$file")" ]]; then
+            rel_file=$(realpath --relative-to="$PWD" "$file")
+            printf "Would modify: %s\n" "$rel_file" >&2
+            diff_out=$(diff -u "$file" - <<< "$transformed" || true)
+            output=$(printf '%s\n' "$diff_out" \
+                | sed -e "s|^--- .*|--- ${rel_file}|" \
+                      -e "s|^+++ .*|+++ ${rel_file}|")
+            printf '%s\n\n' "$output"
+        fi
+    else
+        if [[ -n "$backup_ext" ]]; then
+            cp "$file" "${file}${backup_ext}" 2>/dev/null || {
+                printf "Warning: Failed to create backup for %s\n" "$file" >&2
+                return 1
+            }
+        fi
+        perl -i -pe "$PERL_SCRIPT" -- "$file" 2>/dev/null || {
+            printf "Warning: Failed to process %s\n" "$file" >&2
+            return 1
+        }
+    fi
+}
+
+export -f process_file
+export PERL_SCRIPT dry_run backup_ext
+
+if [[ "$dry_run" -eq 1 ]]; then
     printf "Running in DRY-RUN mode - no files will be modified\n" >&2
     printf "Remove -d or --dry-run to apply changes\n" >&2
+    while IFS= read -r file; do
+        process_file "$file"
+    done < <("${rg_cmd[@]}")
+else
+    running=0
+    while IFS= read -r file; do
+        process_file "$file" &
+        running=$(( running + 1 ))
+        if [[ "$running" -ge "$parallel_jobs" ]]; then
+            wait -n || true
+            running=$(( running - 1 ))
+        fi
+    done < <("${rg_cmd[@]}")
+    wait
 fi
-
-for (( i = 0; i < ${#SUBSTITUTIONS[@]}; i += 2 )); do
-    pattern="${SUBSTITUTIONS[$i]}"
-    replacement="${SUBSTITUTIONS[$((i + 1))]}"
-    # Filter stderr: suppress the per-invocation dry-run banner lines emitted
-    # by replace-in-files but keep any Warning: lines so nothing real is lost.
-    "$REPLACE" "${passthrough_args[@]}" "$pattern" "$replacement" "${directories[@]}" \
-        2> >(grep -v '^\(Running in DRY-RUN mode\|Remove -d\)' >&2 || true)
-done
 
 printf "Done.\n" >&2

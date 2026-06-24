@@ -28,6 +28,7 @@
             api-curl-helpers   = pkgs'.jvscripts.api-curl-helpers;
             nix-helpers        = pkgs'.jvscripts.nix-helpers;
             backup-gpg-keys    = pkgs'.jvscripts.backup-gpg-keys;
+            british-to-american = pkgs'.jvscripts.british-to-american;
             cci-helpers        = pkgs'.jvscripts.cci-helpers;
             confluence-helpers = pkgs'.jvscripts.confluence-helpers;
             jira-helpers       = pkgs'.jvscripts.jira-helpers;

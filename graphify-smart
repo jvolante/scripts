@@ -1,0 +1,340 @@
+#!/usr/bin/env bash
+# graphify-smart - staleness-aware wrapper for graphify
+#
+# For query/path/explain subcommands:
+#   1. Locates the nearest git root containing a graphify-out/graph.json
+#   2. Compares graph.json mtime against the latest git commit timestamp
+#   3. If stale and only code files changed: runs `graphify run --update` silently (AST-only, no LLM)
+#   4. If stale and doc/image files also changed: prints a one-line notice and proceeds
+#   5. If no graph exists: prints a notice suggesting the graph-builder subagent
+#
+# path and explain subcommands are handled natively in bash+jq (no python required).
+# All other subcommands (run, hook, install, etc.) are passed through to the graphify binary.
+
+set -euo pipefail
+
+# Code file extensions that the AST pass handles (no LLM needed)
+readonly CODE_EXTS=".py .ts .js .go .rs .java .cpp .c .rb .swift .kt .cs .scala .php .cc .cxx .hpp .h .kts .lua .nix .zig .ex .exs .elm .ml .mli .fs .fsx .clj .cljs .r .jl .nim .cr .vhd .v .sv"
+
+GRAPHIFY_BIN="$(which graphify 2>/dev/null || true)"
+readonly GRAPHIFY_BIN
+
+_die() {
+    printf 'graphify-smart: %s\n' "$*" >&2
+    exit 1
+}
+
+_is_code_ext() {
+    local ext="${1##*.}"
+    ext=".${ext}"
+    [[ " ${CODE_EXTS} " == *" ${ext} "* ]]
+}
+
+# Find the git root of the current directory, walking up the tree
+_find_git_root() {
+    local dir="${1:-$PWD}"
+    while [[ "$dir" != "/" ]]; do
+        if [[ -d "$dir/.git" ]]; then
+            printf '%s' "$dir"
+            return 0
+        fi
+        dir="$(dirname "$dir")"
+    done
+    return 1
+}
+
+# Find a graphify-out/graph.json by walking up from current dir
+_find_graph_root() {
+    local dir="${1:-$PWD}"
+    while [[ "$dir" != "/" ]]; do
+        if [[ -f "$dir/graphify-out/graph.json" ]]; then
+            printf '%s' "$dir"
+            return 0
+        fi
+        dir="$(dirname "$dir")"
+    done
+    return 1
+}
+
+_check_staleness_and_update() {
+    local graph_root="$1"
+    local graph_json="${graph_root}/graphify-out/graph.json"
+
+    # Get graph.json mtime as unix timestamp
+    local graph_mtime
+    graph_mtime="$(stat -c '%Y' "$graph_json" 2>/dev/null || stat -f '%m' "$graph_json" 2>/dev/null || echo 0)"
+
+    # Get latest git commit timestamp in the graph root
+    local git_root
+    if ! git_root="$(_find_git_root "$graph_root")"; then
+        # Not a git repo - can't determine staleness, proceed as-is
+        return 0
+    fi
+
+    local last_commit_time
+    last_commit_time="$(git -C "$git_root" log -1 --format='%ct' HEAD 2>/dev/null || echo 0)"
+
+    if [[ "$last_commit_time" -le "$graph_mtime" ]]; then
+        # Graph is up to date
+        return 0
+    fi
+
+    # Graph is stale - check what changed since graph was last written
+    # Use git to find files changed since graph_mtime
+    local changed_files
+    changed_files="$(git -C "$git_root" diff --name-only \
+        "$(git -C "$git_root" rev-list -1 --before="@${graph_mtime}" HEAD 2>/dev/null || echo HEAD)" \
+        HEAD 2>/dev/null || true)"
+
+    if [[ -z "$changed_files" ]]; then
+        # Can't determine changed files precisely (shallow clone, etc.) - treat as code-only to be safe
+        changed_files=""
+    fi
+
+    # Check if any non-code files changed
+    local has_non_code=false
+    while IFS= read -r f; do
+        [[ -z "$f" ]] && continue
+        if ! _is_code_ext "$f"; then
+            has_non_code=true
+            break
+        fi
+    done <<< "$changed_files"
+
+    if [[ "$has_non_code" == true ]]; then
+        printf '[graphify-smart] Graph may be stale: doc/image files changed since last build. Run /graphify --update for a full semantic refresh.\n' >&2
+        return 0
+    fi
+
+    # Code-only changes: run incremental AST update silently
+    printf '[graphify-smart] Code changes detected since last graph build - running incremental update...\n' >&2
+    if [[ -z "$GRAPHIFY_BIN" ]]; then
+        _die "graphify not found on PATH"
+    fi
+    (cd "$graph_root" && "$GRAPHIFY_BIN" run --update "$graph_root" 2>&1 | grep -E '^\[graphify|^Graph:|^Merged:|^AST:|^Update|^No files' >&2 || true)
+    printf '[graphify-smart] Incremental update complete.\n' >&2
+}
+
+# Resolve the graph.json path by walking up from PWD.
+# Prints the resolved path to stdout, or empty string if not found.
+_resolve_graph() {
+    local graph_root
+    if graph_root="$(_find_graph_root "$PWD")"; then
+        printf '%s' "${graph_root}/graphify-out/graph.json"
+    fi
+}
+
+# Find the best-matching node id for a search term using scored label matching:
+#   3 = exact label match
+#   2 = case-insensitive exact match
+#   1 = case-insensitive prefix match
+#   0 = case-insensitive substring match
+# Prints the node id to stdout, or empty string if no match.
+_find_best_node() {
+    local graph_file="$1" term="$2"
+    jq -r --arg t "$term" '
+        [.nodes[] | {id, score: (
+            if .label == $t then 3
+            elif (.label | ascii_downcase) == ($t | ascii_downcase) then 2
+            elif (.label | ascii_downcase | startswith($t | ascii_downcase)) then 1
+            elif (.label | ascii_downcase | contains($t | ascii_downcase)) then 0
+            else -1 end
+        )} | select(.score >= 0)] | sort_by(-.score) | first | .id // empty
+    ' "$graph_file"
+}
+
+# graphify-smart explain "NodeName" [--graph path/to/graph.json]
+# Prints the node metadata and all direct connections (both directions).
+_cmd_explain() {
+    local term="" graph_file=""
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --graph) graph_file="$2"; shift 2 ;;
+            *)       term="$1"; shift ;;
+        esac
+    done
+
+    [[ -z "$term" ]] && _die "explain: missing node name. Usage: graphify-smart explain \"NodeName\" [--graph path]"
+
+    if [[ -z "$graph_file" ]]; then
+        graph_file="$(_resolve_graph)"
+    fi
+    if [[ -z "$graph_file" || ! -f "$graph_file" ]]; then
+        printf '[graphify-smart] No graphify-out/graph.json found in this directory tree.\n' >&2
+        printf '[graphify-smart] Dispatch the graph-builder subagent to build one, or run: graphify run <path>\n' >&2
+        return 1
+    fi
+
+    local node_id
+    node_id="$(_find_best_node "$graph_file" "$term")"
+    if [[ -z "$node_id" ]]; then
+        printf 'No node matching %s\n' "$term"
+        return 0
+    fi
+
+    # Print node metadata
+    jq -r --arg id "$node_id" '
+        .nodes[] | select(.id == $id) |
+        "NODE: \(.label)",
+        "  source: \(.source_file // "unknown")",
+        "  type:   \(.file_type // "unknown")",
+        "  loc:    \(.source_location // "unknown")"
+    ' "$graph_file"
+
+    printf '\nCONNECTIONS:\n'
+
+    # Print all direct connections (outgoing and incoming), resolving ids to labels
+    jq -r --arg id "$node_id" '
+        (reduce .nodes[] as $n ({}; .[$n.id] = $n.label)) as $labels |
+        .links[] | select(.source == $id or .target == $id) |
+        if .source == $id then
+            "  --\(.relation)--> \($labels[.target] // .target) [\(.confidence)] (\(.source_file // ""))"
+        else
+            "  <--\(.relation)-- \($labels[.source] // .source) [\(.confidence)] (\(.source_file // ""))"
+        end
+    ' "$graph_file"
+}
+
+# graphify-smart path "NodeA" "NodeB" [--graph path/to/graph.json]
+# Finds and prints the shortest path between two named nodes using BFS.
+# Loads the full adjacency list with a single jq call for performance.
+_cmd_path() {
+    local a_term="" b_term="" graph_file=""
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --graph) graph_file="$2"; shift 2 ;;
+            *)
+                if [[ -z "$a_term" ]]; then a_term="$1"
+                elif [[ -z "$b_term" ]]; then b_term="$1"
+                fi
+                shift ;;
+        esac
+    done
+
+    [[ -z "$a_term" || -z "$b_term" ]] && _die "path: requires two node names. Usage: graphify-smart path \"NodeA\" \"NodeB\" [--graph path]"
+
+    if [[ -z "$graph_file" ]]; then
+        graph_file="$(_resolve_graph)"
+    fi
+    if [[ -z "$graph_file" || ! -f "$graph_file" ]]; then
+        printf '[graphify-smart] No graphify-out/graph.json found in this directory tree.\n' >&2
+        printf '[graphify-smart] Dispatch the graph-builder subagent to build one, or run: graphify run <path>\n' >&2
+        return 1
+    fi
+
+    local src_id tgt_id
+    src_id="$(_find_best_node "$graph_file" "$a_term")"
+    tgt_id="$(_find_best_node "$graph_file" "$b_term")"
+
+    if [[ -z "$src_id" ]]; then
+        printf 'No node matching %s\n' "$a_term"; return 0
+    fi
+    if [[ -z "$tgt_id" ]]; then
+        printf 'No node matching %s\n' "$b_term"; return 0
+    fi
+    if [[ "$src_id" == "$tgt_id" ]]; then
+        local label
+        label="$(jq -r --arg id "$src_id" '.nodes[] | select(.id==$id) | .label' "$graph_file")"
+        printf 'Shortest path (0 hops):\n  %s\n' "$label"
+        return 0
+    fi
+
+    # Load full adjacency list with one jq call: "src_id TAB tgt_id TAB relation TAB confidence"
+    # Graph is undirected - store each edge in both directions.
+    declare -A adj  # adj[node_id]="neighbor:rel:conf neighbor:rel:conf ..."
+    while IFS=$'\t' read -r s t r c; do
+        adj["$s"]+="${t}:${r}:${c} "
+        adj["$t"]+="${s}:${r}:${c} "
+    done < <(jq -r '.links[] | [.source, .target, .relation, .confidence] | @tsv' "$graph_file")
+
+    # Load id->label map
+    declare -A id2label
+    while IFS=$'\t' read -r id label; do
+        id2label["$id"]="$label"
+    done < <(jq -r '.nodes[] | [.id, .label] | @tsv' "$graph_file")
+
+    # BFS
+    declare -A visited parent_node parent_rel parent_conf
+    local queue=("$src_id")
+    visited["$src_id"]=1
+    parent_node["$src_id"]=""
+    local found=false
+
+    while [[ ${#queue[@]} -gt 0 ]]; do
+        local current="${queue[0]}"
+        queue=("${queue[@]:1}")
+        if [[ "$current" == "$tgt_id" ]]; then found=true; break; fi
+        for entry in ${adj[$current]:-}; do
+            IFS=: read -r neighbor rel conf <<< "$entry"
+            [[ -z "$neighbor" ]] && continue
+            if [[ -z "${visited[$neighbor]+x}" ]]; then
+                visited["$neighbor"]=1
+                parent_node["$neighbor"]="$current"
+                parent_rel["$neighbor"]="$rel"
+                parent_conf["$neighbor"]="$conf"
+                queue+=("$neighbor")
+            fi
+        done
+    done
+
+    if [[ "$found" == false ]]; then
+        printf 'No path found between %s and %s\n' "$a_term" "$b_term"
+        return 0
+    fi
+
+    # Reconstruct path by walking parent map back from target
+    local path=()
+    local node="$tgt_id"
+    while [[ -n "$node" ]]; do
+        path=("$node" "${path[@]}")
+        node="${parent_node[$node]}"
+    done
+
+    printf 'Shortest path (%d hops):\n' "$(( ${#path[@]} - 1 ))"
+    local i
+    for (( i=0; i<${#path[@]}; i++ )); do
+        local nid="${path[$i]}"
+        local label="${id2label[$nid]:-$nid}"
+        if (( i < ${#path[@]} - 1 )); then
+            local next="${path[$((i+1))]}"
+            printf '  %s --%s--> [%s]\n' "$label" "${parent_rel[$next]}" "${parent_conf[$next]}"
+        else
+            printf '  %s\n' "$label"
+        fi
+    done
+}
+
+# --- main ---
+
+if [[ -z "$GRAPHIFY_BIN" ]]; then
+    _die "graphify not found on PATH. Install with: pip install graphifyy"
+fi
+
+# Subcommands that benefit from staleness checking
+case "${1:-}" in
+    query)
+        graph_root=""
+        if graph_root="$(_find_graph_root "$PWD")"; then
+            _check_staleness_and_update "$graph_root"
+        else
+            printf '[graphify-smart] No graphify-out/graph.json found in this directory tree.\n' >&2
+            printf '[graphify-smart] Dispatch the graph-builder subagent to build one, or run: graphify run <path>\n' >&2
+            # Still pass through - graphify will emit its own error
+        fi
+        exec "$GRAPHIFY_BIN" "$@"
+        ;;
+    explain)
+        shift
+        _cmd_explain "$@"
+        exit $?
+        ;;
+    path)
+        shift
+        _cmd_path "$@"
+        exit $?
+        ;;
+    *)
+        # Pass through: run, hook, install, --version, --help, etc.
+        exec "$GRAPHIFY_BIN" "$@"
+        ;;
+esac

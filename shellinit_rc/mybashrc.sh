@@ -59,6 +59,61 @@ codecs() {
   ffmpeg -encoders 2>&1 | grep -E "(h264|h265|vp8|vp9|av1|hevc)"
 }
 
+setup_profiling() {
+    local enable=$1
+
+    if [[ $enable == 1 ]]; then
+        echo "Setting up Linux profiling..."
+
+        # Set perf_event_paranoia to allow user-space profiling
+        echo "  Setting perf_event_paranoid=1..."
+        sudo sysctl kernel.perf_event_paranoid=1
+
+        # Increase sample rate
+        echo "  Setting perf_event_max_sample_rate=100000..."
+        sudo sysctl kernel.perf_event_max_sample_rate=100000
+
+        # Increase locked memory for perf buffers
+        echo "  Setting ulimit -l unlimited..."
+        ulimit -l unlimited
+
+        # Disable kptr_restrict to show kernel pointers in profiles
+        echo "  Setting kptr_restrict=0..."
+        sudo sysctl kernel.kptr_restrict=0
+
+        echo "Profiling setup complete!"
+        echo ""
+        echo "Current settings:"
+        echo "  perf_event_paranoid: $(cat /proc/sys/kernel/perf_event_paranoid)"
+        echo "  perf_event_max_sample_rate: $(cat /proc/sys/kernel/perf_event_max_sample_rate)"
+        echo "  kptr_restrict: $(cat /proc/sys/kernel/kptr_restrict)"
+        echo "  locked memory: $(ulimit -l)"
+
+    elif [[ $enable == 0 ]]; then
+        echo "Unsetting profiling configuration..."
+
+        # Restore default paranoia level
+        echo "  Setting perf_event_paranoid=3 (default)..."
+        sudo sysctl kernel.perf_event_paranoid=3
+
+        # Restore default sample rate
+        echo "  Setting perf_event_max_sample_rate=100000 (typical default)..."
+        sudo sysctl kernel.perf_event_max_sample_rate=100000
+
+        # Restore kptr_restrict
+        echo "  Setting kptr_restrict=1 (default)..."
+        sudo sysctl kernel.kptr_restrict=1
+
+        echo "Profiling configuration reset to defaults!"
+
+    else
+        echo "Usage: setup_profiling 1|0"
+        echo "  1 = enable profiling setup"
+        echo "  0 = reset to defaults"
+        return 1
+    fi
+}
+
 clonecd() {
   local repo_url repo_dir
   if (($# > 1)); then

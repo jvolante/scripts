@@ -4,18 +4,26 @@ set -euo pipefail
 
 # Perform regex find-and-replace across multiple files in parallel.
 # Uses ripgrep for file discovery (auto-skips binary files, respects .gitignore)
-# and sd for replacement (Rust regex: \d, \w, \b, lookaheads, named captures).
+# and perl for replacement (PCRE regex, full perl -pe expression support).
 
 usage() {
     cat <<EOF
-Usage: $(basename "$0") [OPTIONS] <pattern> <replacement> <directories...>
+Usage: $(basename "$0") [OPTIONS] <perl-script> <directories...>
 
-Perform regex find-and-replace across files in specified directories.
+Perform find-and-replace across files in specified directories.
 By default modifies files in place.
 
-Pattern and replacement use Rust regex syntax (via sd):
-  \\d  \\w  \\b  \\s  (?:...)  lookaheads  named captures (?P<name>...)
-  Capture groups referenced in replacement as \$1, \$2, or \${name}
+The perl-script argument is passed directly to 'perl -pe', so the full
+perl substitution syntax is available:
+
+  s/pattern/replacement/g        basic replacement
+  s/pattern/replacement/gi       case-insensitive
+  s/pattern/replacement/ge       evaluate replacement as perl expression
+  s/pattern/\$1 * 2/ge           double all numbers
+  sub f { ... } s/pat/f(\$&)/ge  define helpers inline
+
+Capture groups are referenced as \$1, \$2, or \$+{name} (named captures).
+Use \$& for the full match.
 
 OPTIONS:
     -t, --type TYPE     Filter by file type (can be specified multiple times)
@@ -27,34 +35,42 @@ OPTIONS:
     -h, --help          Show this help message
 
 ARGUMENTS:
-    pattern             Rust regex pattern to search for
-    replacement         Replacement string (use \$1, \$2 for capture groups)
+    perl-script         A perl -pe expression (quoted to protect from shell)
     directories         One or more directories to search
 
 EXAMPLES:
     # Rename a symbol in Python files
-    $(basename "$0") -t py 'old_name' 'new_name' src/
+    $(basename "$0") -t py 's/old_name/new_name/g' src/
 
-    # Rename with word boundary to avoid partial matches
-    $(basename "$0") '\bold_name\b' 'new_name' src/
+    # Word boundary — avoids partial matches
+    $(basename "$0") 's/\bold_name\b/new_name/g' src/
 
-    # Use a capture group
-    $(basename "$0") 'ISL-(\d+)' 'PROJ-\$1' .
+    # Case-insensitive
+    $(basename "$0") 's/\bcolour\b/color/gi' src/
+
+    # Capture group — rename issue prefix
+    $(basename "$0") 's/ISL-(\d+)/PROJ-\$1/g' .
+
+    # Named capture
+    $(basename "$0") 's/(?<id>\d+)/ID_\$+{id}/g' .
+
+    # Evaluate replacement as perl expression (double all integers)
+    $(basename "$0") 's/\b(\d+)\b/\$1 * 2/ge' src/
+
+    # Case-preserving substitution with helper sub
+    $(basename "$0") 'sub fc { \$_[0] eq uc \$_[0] ? uc \$_[1] : \$_[0] eq ucfirst lc \$_[0] ? ucfirst \$_[1] : \$_[1] } s/\bcolour\b/fc(\$&, "color")/gie' src/
 
     # Dry-run: show what would change
-    $(basename "$0") -d 'foo' 'bar' src/
+    $(basename "$0") -d 's/foo/bar/g' src/
 
     # Multiple file types
-    $(basename "$0") -t cpp -t hpp 'OldClass' 'NewClass' src/
+    $(basename "$0") -t cpp -t hpp 's/OldClass/NewClass/g' src/
 
-    # All text files (no type filter)
-    $(basename "$0") '2024' '2025' ./
+    # With backup files
+    $(basename "$0") -b .bak 's/old/new/g' ./
 
     # Limit to 4 parallel jobs
-    $(basename "$0") -j 4 'foo' 'bar' src/
-
-    # Create backup files before modifying
-    $(basename "$0") -b .bak 'foo' 'bar' ./
+    $(basename "$0") -j 4 's/foo/bar/g' src/
 
 EOF
     exit 0
@@ -115,15 +131,14 @@ while [[ $# -gt 0 ]]; do
 done
 
 # Check for required arguments
-if [[ $# -lt 3 ]]; then
+if [[ $# -lt 2 ]]; then
     printf "Error: Missing required arguments\n" >&2
     printf "Use -h or --help for usage information\n" >&2
     exit 1
 fi
 
-pattern="$1"
-replacement="$2"
-shift 2
+perl_script="$1"
+shift
 directories=("$@")
 
 # Validate directories
@@ -149,27 +164,19 @@ fi
 # Process a single file.
 process_file() {
     local file="$1"
-    local pat="$2"
-    local rep="$3"
-    local is_dry_run="$4"
-    local backup_extension="$5"
 
-    if [[ "$is_dry_run" -eq 1 ]]; then
-        # Run sd in preview mode (outputs transformed content) and diff against original.
-        # diff headers go to stdout so output can be piped directly into patch(1).
+    if [[ "$dry_run" -eq 1 ]]; then
+        # Run perl in read-only mode and diff against original.
+        # diff output goes to stdout so it can be piped into patch(1).
         # Informational messages go to stderr to avoid corrupting the diff stream.
         local transformed diff_out rel_file output
-        transformed=$(sd --preview "$pat" "$rep" "$file" 2>/dev/null) || {
+        transformed=$(perl -pe "$perl_script" -- "$file" 2>/dev/null) || {
             printf "Warning: Failed to process %s\n" "$file" >&2
             return 1
         }
         if [[ "$transformed" != "$(cat "$file")" ]]; then
-            # Use a path relative to PWD so patch(1) can apply the result
-            # without --unsafe-paths: patch -p0 < changes.patch
             rel_file=$(realpath --relative-to="$PWD" "$file")
             printf "Would modify: %s\n" "$rel_file" >&2
-            # Build the full diff block in a variable before printing so the
-            # single printf is the only write — no interleaving possible.
             diff_out=$(diff -u "$file" - <<< "$transformed" || true)
             output=$(printf '%s\n' "$diff_out" \
                 | sed -e "s|^--- .*|--- ${rel_file}|" \
@@ -177,34 +184,34 @@ process_file() {
             printf '%s\n\n' "$output"
         fi
     else
-        if [[ -n "$backup_extension" ]]; then
-            cp "$file" "${file}${backup_extension}" 2>/dev/null || {
+        if [[ -n "$backup_ext" ]]; then
+            cp "$file" "${file}${backup_ext}" 2>/dev/null || {
                 printf "Warning: Failed to create backup for %s\n" "$file" >&2
                 return 1
             }
         fi
-        sd "$pat" "$rep" "$file" 2>/dev/null || {
+        perl -i -pe "$perl_script" -- "$file" 2>/dev/null || {
             printf "Warning: Failed to process %s\n" "$file" >&2
             return 1
         }
     fi
 }
 
+export -f process_file
+export perl_script dry_run backup_ext
+
 if [[ "$dry_run" -eq 1 ]]; then
     printf "Running in DRY-RUN mode - no files will be modified\n" >&2
     printf "Remove -d or --dry-run to apply changes\n" >&2
-    # Dry-run is serial: coherent stdout is more important than speed, and
-    # the bottleneck is sd+diff I/O anyway.
+    # Dry-run is serial: coherent stdout is more important than speed.
     while IFS= read -r file; do
-        process_file "$file" "$pattern" "$replacement" 1 "$backup_ext"
+        process_file "$file"
     done < <("${rg_cmd[@]}")
 else
-    # In-place: dispatch jobs as filenames arrive from rg — no need to buffer
-    # the full list first. Each job writes to a different file so there are no
-    # stdout races.
+    # In-place: dispatch jobs as filenames arrive from rg.
     running=0
     while IFS= read -r file; do
-        process_file "$file" "$pattern" "$replacement" 0 "$backup_ext" &
+        process_file "$file" &
         running=$(( running + 1 ))
 
         # Throttle: when the pool is full, wait for any one job to finish.

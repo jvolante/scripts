@@ -135,82 +135,125 @@ cci-log-sanitize() {
   _in_pem { next }
 
   # --- inline secret patterns -------------------------------------------------
+  # POSIX awk (mawk/nawk compatible): use 2-arg match() + RSTART/RLENGTH/substr.
+  # For patterns where the full match IS the secret (no leading prefix to strip),
+  # substr(line, RSTART, RLENGTH) gives the value directly.
+  # For patterns with a keyword prefix: match the full prefix+value, then apply a
+  # second match() on that substring to find the value portion (avoids passing
+  # regex literals as function arguments, which is not portable in POSIX awk).
   {
     line = $0
 
     # Circle-Token header value
-    while (match(line, /Circle-Token:[[:space:]]*([^[:space:]"'"'"'\\]+)/, m)) {
-      id = secret_id(m[1])
-      sub(m[1], "[SECRET:circle-token:" id "]", line)
-      break
+    # Match "Circle-Token: <value>", then re-match to extract just the value.
+    if (match(line, /Circle-Token:[[:space:]]*[^[:space:]"'"'"'\\]+/)) {
+      tmp = substr(line, RSTART, RLENGTH)
+      if (match(tmp, /[^[:space:]"'"'"'\\]+$/)) {
+        val = substr(tmp, RSTART, RLENGTH)
+        id = secret_id(val)
+        sub(val, "[SECRET:circle-token:" id "]", line)
+      }
     }
 
     # Authorization: Bearer <token>
-    while (match(line, /Authorization:[[:space:]]*Bearer[[:space:]]+([^[:space:]"'"'"'\\]+)/, m)) {
-      id = secret_id(m[1])
-      sub(m[1], "[SECRET:bearer-token:" id "]", line)
-      break
+    if (match(line, /Authorization:[[:space:]]*Bearer[[:space:]]+[^[:space:]"'"'"'\\]+/)) {
+      tmp = substr(line, RSTART, RLENGTH)
+      if (match(tmp, /[^[:space:]"'"'"'\\]+$/)) {
+        val = substr(tmp, RSTART, RLENGTH)
+        id = secret_id(val)
+        sub(val, "[SECRET:bearer-token:" id "]", line)
+      }
     }
 
     # Authorization: Basic <value>
-    while (match(line, /Authorization:[[:space:]]*Basic[[:space:]]+([^[:space:]"'"'"'\\]+)/, m)) {
-      id = secret_id(m[1])
-      sub(m[1], "[SECRET:basic-auth:" id "]", line)
-      break
+    if (match(line, /Authorization:[[:space:]]*Basic[[:space:]]+[^[:space:]"'"'"'\\]+/)) {
+      tmp = substr(line, RSTART, RLENGTH)
+      if (match(tmp, /[^[:space:]"'"'"'\\]+$/)) {
+        val = substr(tmp, RSTART, RLENGTH)
+        id = secret_id(val)
+        sub(val, "[SECRET:basic-auth:" id "]", line)
+      }
     }
 
     # AWS access key IDs: AKIA followed by 16 uppercase alphanumerics
-    while (match(line, /(AKIA[A-Z0-9]{16})/, m)) {
-      id = secret_id(m[1])
-      gsub(m[1], "[SECRET:aws-key:" id "]", line)
-      break
+    if (match(line, /AKIA[A-Z0-9][A-Z0-9][A-Z0-9][A-Z0-9][A-Z0-9][A-Z0-9][A-Z0-9][A-Z0-9][A-Z0-9][A-Z0-9][A-Z0-9][A-Z0-9][A-Z0-9][A-Z0-9][A-Z0-9][A-Z0-9]/)) {
+      val = substr(line, RSTART, RLENGTH)
+      id = secret_id(val)
+      gsub(val, "[SECRET:aws-key:" id "]", line)
     }
 
-    # GitHub tokens: ghp_ / ghs_ followed by 36 or more alphanumerics
-    while (match(line, /(gh[ps]_[A-Za-z0-9]{36,})/, m)) {
-      id = secret_id(m[1])
-      gsub(m[1], "[SECRET:github-token:" id "]", line)
-      break
+    # GitHub tokens: ghp_ / ghs_ followed by 36+ alphanumerics
+    # mawk does not support {n,} interval expressions; use a long explicit chain instead.
+    if (match(line, /gh[ps]_[A-Za-z0-9][A-Za-z0-9][A-Za-z0-9][A-Za-z0-9][A-Za-z0-9][A-Za-z0-9][A-Za-z0-9][A-Za-z0-9][A-Za-z0-9][A-Za-z0-9][A-Za-z0-9][A-Za-z0-9][A-Za-z0-9][A-Za-z0-9][A-Za-z0-9][A-Za-z0-9][A-Za-z0-9][A-Za-z0-9][A-Za-z0-9][A-Za-z0-9][A-Za-z0-9][A-Za-z0-9][A-Za-z0-9][A-Za-z0-9][A-Za-z0-9][A-Za-z0-9][A-Za-z0-9][A-Za-z0-9][A-Za-z0-9][A-Za-z0-9][A-Za-z0-9][A-Za-z0-9][A-Za-z0-9][A-Za-z0-9][A-Za-z0-9][A-Za-z0-9][A-Za-z0-9]*/)) {
+      val = substr(line, RSTART, RLENGTH)
+      id = secret_id(val)
+      gsub(val, "[SECRET:github-token:" id "]", line)
     }
 
-    # GitLab personal access tokens: glpat- followed by 20 alphanumerics/hyphens
-    while (match(line, /(glpat-[A-Za-z0-9-]{20})/, m)) {
-      id = secret_id(m[1])
-      gsub(m[1], "[SECRET:gitlab-token:" id "]", line)
-      break
+    # GitLab personal access tokens: glpat- followed by exactly 20 alphanumerics/hyphens
+    if (match(line, /glpat-[A-Za-z0-9-][A-Za-z0-9-][A-Za-z0-9-][A-Za-z0-9-][A-Za-z0-9-][A-Za-z0-9-][A-Za-z0-9-][A-Za-z0-9-][A-Za-z0-9-][A-Za-z0-9-][A-Za-z0-9-][A-Za-z0-9-][A-Za-z0-9-][A-Za-z0-9-][A-Za-z0-9-][A-Za-z0-9-][A-Za-z0-9-][A-Za-z0-9-][A-Za-z0-9-][A-Za-z0-9-]/)) {
+      val = substr(line, RSTART, RLENGTH)
+      id = secret_id(val)
+      gsub(val, "[SECRET:gitlab-token:" id "]", line)
     }
 
-    # JWT: three base64url segments each at least 20 chars, separated by dots
-    while (match(line, /([A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,})/, m)) {
-      id = secret_id(m[1])
-      gsub(m[1], "[SECRET:jwt:" id "]", line)
-      break
+    # JWT: three base64url segments each at least 20 chars, separated by dots.
+    # Represented as 20+ chars . 20+ chars . 20+ chars (greedy last segment).
+    if (match(line, /[A-Za-z0-9_-][A-Za-z0-9_-][A-Za-z0-9_-][A-Za-z0-9_-][A-Za-z0-9_-][A-Za-z0-9_-][A-Za-z0-9_-][A-Za-z0-9_-][A-Za-z0-9_-][A-Za-z0-9_-][A-Za-z0-9_-][A-Za-z0-9_-][A-Za-z0-9_-][A-Za-z0-9_-][A-Za-z0-9_-][A-Za-z0-9_-][A-Za-z0-9_-][A-Za-z0-9_-][A-Za-z0-9_-][A-Za-z0-9_-][A-Za-z0-9_-]*\.[A-Za-z0-9_-][A-Za-z0-9_-][A-Za-z0-9_-][A-Za-z0-9_-][A-Za-z0-9_-][A-Za-z0-9_-][A-Za-z0-9_-][A-Za-z0-9_-][A-Za-z0-9_-][A-Za-z0-9_-][A-Za-z0-9_-][A-Za-z0-9_-][A-Za-z0-9_-][A-Za-z0-9_-][A-Za-z0-9_-][A-Za-z0-9_-][A-Za-z0-9_-][A-Za-z0-9_-][A-Za-z0-9_-][A-Za-z0-9_-][A-Za-z0-9_-]*\.[A-Za-z0-9_-][A-Za-z0-9_-][A-Za-z0-9_-][A-Za-z0-9_-][A-Za-z0-9_-][A-Za-z0-9_-][A-Za-z0-9_-][A-Za-z0-9_-][A-Za-z0-9_-][A-Za-z0-9_-][A-Za-z0-9_-][A-Za-z0-9_-][A-Za-z0-9_-][A-Za-z0-9_-][A-Za-z0-9_-][A-Za-z0-9_-][A-Za-z0-9_-][A-Za-z0-9_-][A-Za-z0-9_-][A-Za-z0-9_-][A-Za-z0-9_-]*/)) {
+      val = substr(line, RSTART, RLENGTH)
+      id = secret_id(val)
+      gsub(val, "[SECRET:jwt:" id "]", line)
     }
 
     # SSH public keys in known_hosts format: <host> <key-type> <base64blob>
     # Keeps the host and key-type (useful context) but replaces the blob.
     # Key types: ssh-rsa, ssh-ed25519, ecdsa-sha2-nistp{256,384,521}
-    while (match(line, /^([^[:space:]]+[[:space:]]+(ssh-rsa|ssh-ed25519|ecdsa-sha2-nistp256|ecdsa-sha2-nistp384|ecdsa-sha2-nistp521)[[:space:]]+)(AAAA[A-Za-z0-9+\/]+=*)/, m)) {
-      id = secret_id(m[3])
-      # m[1] is "<host> <key-type> ", m[3] is the blob — replace blob with marker.
-      # Use substr arithmetic to avoid regex-metachar issues with sub().
-      blob_start = index(line, m[3])
-      line = substr(line, 1, blob_start - 1) "[PUBLIC-KEY:" m[2] ":" id "]" substr(line, blob_start + length(m[3]))
-      break
+    # Strategy: match the blob (AAAA...) directly, then use index() for placement.
+    if (match(line, /^[^[:space:]]+[[:space:]]+(ssh-rsa|ssh-ed25519|ecdsa-sha2-nistp256|ecdsa-sha2-nistp384|ecdsa-sha2-nistp521)[[:space:]]+AAAA[A-Za-z0-9+\/]+=*/)) {
+      # Extract key-type by finding it between first and second spaces after host
+      prefix_end = RSTART + RLENGTH
+      # Find the blob: it starts at the last run of AAAA in the matched region
+      tmp = substr(line, RSTART, RLENGTH)
+      if (match(tmp, /AAAA[A-Za-z0-9+\/]+=*/)) {
+        blob = substr(tmp, RSTART, RLENGTH)
+        # Extract key-type: the word before the blob
+        key_type_region = substr(tmp, 1, RSTART - 1)
+        if (match(key_type_region, /(ssh-rsa|ssh-ed25519|ecdsa-sha2-nistp256|ecdsa-sha2-nistp384|ecdsa-sha2-nistp521)/)) {
+          key_type = substr(key_type_region, RSTART, RLENGTH)
+        } else {
+          key_type = "unknown"
+        }
+        id = secret_id(blob)
+        blob_start = index(line, blob)
+        line = substr(line, 1, blob_start - 1) "[PUBLIC-KEY:" key_type ":" id "]" substr(line, blob_start + length(blob))
+      }
     }
 
     # Environment variable assignments where the var name suggests a secret.
-    # Matches: export FOO_TOKEN="value", FOO_SECRET=value, etc.
-    # Captures only the value portion so the var name stays visible.
-    while (match(line, /[Ee][Xx][Pp][Oo][Rr][Tt][[:space:]]+[A-Z_a-z][A-Z_a-z0-9]*(_[Kk][Ee][Yy]|_[Tt][Oo][Kk][Ee][Nn]|_[Ss][Ee][Cc][Rr][Ee][Tt]|_[Pp][Aa][Ss][Ss][Ww][Oo][Rr][Dd]|_[Pp][Aa][Ss][Ss][Ww][Dd]|_[Cc][Rr][Ee][Dd][Ee][Nn][Tt][Ii][Aa][Ll])[[:space:]]*=[[:space:]]*([^[:space:]"'"'"';\\]+)/, m) || \
-          match(line, /[A-Z_][A-Z_0-9]*(_KEY|_TOKEN|_SECRET|_PASSWORD|_PASSWD|_CREDENTIAL)[[:space:]]*=[[:space:]]*([^[:space:]"'"'"';\\]+)/, m)) {
-      # Capture group index differs: use whichever is non-empty.
-      val = (m[2] != "") ? m[2] : m[3]
-      if (val != "" && val !~ /^\[SECRET:/) {
-        id = secret_id(val)
-        gsub(val, "[SECRET:env-secret:" id "]", line)
+    # Matches: export FOO_TOKEN="value", FOO_SECRET=value, FOO_KEY=value, etc.
+    # Two passes: (1) export-prefixed form, (2) bare uppercase assignment form.
+    # For each: match the full assignment, then extract the value after the = sign.
+    if (match(line, /[Ee][Xx][Pp][Oo][Rr][Tt][[:space:]]+[A-Z_a-z][A-Z_a-z0-9]*(_[Kk][Ee][Yy]|_[Tt][Oo][Kk][Ee][Nn]|_[Ss][Ee][Cc][Rr][Ee][Tt]|_[Pp][Aa][Ss][Ss][Ww][Oo][Rr][Dd]|_[Pp][Aa][Ss][Ss][Ww][Dd]|_[Cc][Rr][Ee][Dd][Ee][Nn][Tt][Ii][Aa][Ll])[[:space:]]*=[[:space:]]*[^[:space:]"'"'"';\\]+/)) {
+      full = substr(line, RSTART, RLENGTH)
+      if (match(full, /=[[:space:]]*[^[:space:]"'"'"';\\]+$/)) {
+        val = substr(full, RSTART + 1, RLENGTH - 1)
+        # Trim leading spaces after =
+        sub(/^[[:space:]]+/, "", val)
+        if (val != "" && val !~ /^\[SECRET:/) {
+          id = secret_id(val)
+          gsub(val, "[SECRET:env-secret:" id "]", line)
+        }
       }
-      break
+    } else if (match(line, /[A-Z_][A-Z_0-9]*(_KEY|_TOKEN|_SECRET|_PASSWORD|_PASSWD|_CREDENTIAL)[[:space:]]*=[[:space:]]*[^[:space:]"'"'"';\\]+/)) {
+      full = substr(line, RSTART, RLENGTH)
+      if (match(full, /=[[:space:]]*[^[:space:]"'"'"';\\]+$/)) {
+        val = substr(full, RSTART + 1, RLENGTH - 1)
+        sub(/^[[:space:]]+/, "", val)
+        if (val != "" && val !~ /^\[SECRET:/) {
+          id = secret_id(val)
+          gsub(val, "[SECRET:env-secret:" id "]", line)
+        }
+      }
     }
 
     print line
@@ -219,7 +262,7 @@ cci-log-sanitize() {
 }
 
 # Strip progress-indicator noise from CCI log output.
-# Simulates terminal CR-overwrite behaviour: for each line, keeps only the
+# Simulates terminal CR-overwrite behavior: for each line, keeps only the
 # final segment after the last bare \r (the state a terminal would display).
 # Works on any tool that uses \r to redraw progress (git, pip, npm, etc.).
 # By default also sanitizes secrets (SSH/API keys etc.) — use --no-sanitize to skip.
@@ -231,7 +274,7 @@ cci-log-clean() {
     sanitize=0
     shift
   fi
-  # Pass 1 (--across): normalise CRLF → LF so \r\n line endings are not
+  # Pass 1 (--across): normalize CRLF → LF so \r\n line endings are not
   #         mistaken for progress overwrites in pass 2.
   # Pass 2 (line-by-line): strip everything up to and including the last
   #         bare \r on each line, leaving only the final overwrite state.

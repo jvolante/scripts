@@ -9,6 +9,7 @@ let
     confluence-helpers = final.callPackage ./pkgs/confluence-helpers { inherit self makeShellInitModule; jvscripts = jvscripts; };
     jira-helpers       = final.callPackage ./pkgs/jira-helpers       { inherit self makeShellInitModule; jvscripts = jvscripts; };
     backup-gpg-keys    = final.callPackage ./pkgs/backup-gpg-keys    { inherit self; };
+    british-to-american = final.callPackage ./pkgs/british-to-american { inherit self makeShellScript; };
     build-flake-packages = final.callPackage ./pkgs/build-flake-packages { inherit self; };
     find-git-repos     = final.callPackage ./pkgs/find-git-repos     { inherit self; };
     get-forge-link     = final.callPackage ./pkgs/get-forge-link     { inherit self; };

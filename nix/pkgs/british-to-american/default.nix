@@ -1,10 +1,10 @@
 { lib, bash, coreutils, diffutils, perl, ripgrep, self, makeShellScript }:
 makeShellScript {
-  name = "replace-in-files";
-  src  = self + "/replace-in-files";
+  name = "british-to-american";
+  src  = self + "/british-to-american";
   propagatedBuildInputs = [ bash coreutils diffutils perl ripgrep ];
   meta = with lib; {
-    description = "Regex find-and-replace across a directory tree using ripgrep for discovery and perl for substitution";
+    description = "Convert British English spellings to American English across a directory tree";
     license = licenses.gpl3;
   };
 }
