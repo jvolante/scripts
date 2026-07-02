@@ -1,0 +1,227 @@
+#!/usr/bin/env bash
+# fix-ci-failures: Find PRs with failing CI, clone each into a temp dir,
+# and dispatch one opencode agent per PR (via systemd transient units) all
+# connected to a shared opencode server.
+#
+# Logs: journalctl --user -u opencode-ci-pr-<slug>-<num>
+#
+# Usage: fix-ci-failures [--dir <workdir>] [--model <provider/model>] [--server-port <port>]
+
+set -euo pipefail
+
+WORK_DIR="${WORK_DIR:-/tmp/fix-ci-failures}"
+SERVER_PORT="${SERVER_PORT:-14799}"
+SERVER_UNIT="opencode-ci-server"
+ENV_FILE=""
+
+# ── Arg parsing ────────────────────────────────────────────────────────────────
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --dir)          WORK_DIR="$2";        shift 2 ;;
+    --model)        export SCRIPT_MODEL_ARG="$2"; shift 2 ;;
+    --server-port)  SERVER_PORT="$2";     shift 2 ;;
+    -h|--help)
+      printf 'Usage: fix-ci-failures [--dir <workdir>] [--model <provider/model>] [--server-port <port>]\n'
+      exit 0 ;;
+    *) printf 'Unknown argument: %s\n' "$1" >&2; exit 1 ;;
+  esac
+done
+
+SERVER_URL="http://127.0.0.1:${SERVER_PORT}"
+
+mkdir -p "$WORK_DIR"
+
+# ── Env file: dump current shell environment for systemd units ─────────────────
+# EnvironmentFile lines must be KEY=VALUE with no shell quoting or functions.
+ENV_FILE=$(mktemp /tmp/fix-ci-failures-env-XXXXXX.conf)
+# Write current shell environment to the env file for systemd units.
+# EnvironmentFile requires KEY=VALUE with no shell quoting — one var per line.
+# Values with literal newlines are collapsed to a single line (handles
+# OPENCODE_CONFIG_CONTENT and similar multiline JSON env vars).
+env -0 | while IFS= read -r -d '' entry; do
+  key="${entry%%=*}"
+  # Skip shell function names and keys with invalid chars
+  [[ "$key" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
+  value="${entry#*=}"
+  # Collapse newlines to spaces so multiline values (e.g. JSON) fit on one line
+  value="${value//$'\n'/ }"
+  printf '%s=%s\n' "$key" "$value"
+done >> "$ENV_FILE"
+# Set BASH_ENV so every bash invocation inside the units sources the shellinit
+# modules (cci-wait-on-jobs, cci-failed-logs, etc.)
+printf 'BASH_ENV=%s\n' "/home/jvolante/.config/opencode/shellinit_env.sh" >> "$ENV_FILE"
+
+# ── Cleanup on exit ────────────────────────────────────────────────────────────
+cleanup() {
+  [[ -n "$ENV_FILE" && -f "$ENV_FILE" ]] && rm -f "$ENV_FILE"
+}
+trap cleanup EXIT
+
+# ── 1. Find failing PRs ────────────────────────────────────────────────────────
+printf 'Fetching open PRs...\n'
+prs_json=$(open-prs --json)
+
+failing=$(printf '%s' "$prs_json" | jq -c '
+  [.[] | select(
+    .commits.nodes[0].commit.statusCheckRollup.state == "FAILURE"
+  )]
+')
+
+count=$(printf '%s' "$failing" | jq 'length')
+if [[ "$count" -eq 0 ]]; then
+  printf 'No PRs with failing CI found.\n'
+  exit 0
+fi
+
+printf 'Found %d PR(s) with failing CI.\n\n' "$count"
+
+# ── 2. Start shared opencode server ───────────────────────────────────────────
+printf 'Starting shared opencode server on port %s (unit: %s)...\n' "$SERVER_PORT" "$SERVER_UNIT"
+
+# Clear any failed units from a previous run before registering new ones.
+systemctl --user stop "$SERVER_UNIT" 2>/dev/null || true
+systemctl --user reset-failed 2>/dev/null || true
+
+systemd-run --user \
+  --unit="$SERVER_UNIT" \
+  --remain-after-exit \
+  --property="EnvironmentFile=${ENV_FILE}" \
+  opencode serve --port "$SERVER_PORT"
+
+# Poll until the server responds (up to 30s)
+printf 'Waiting for server to be ready'
+for i in $(seq 1 30); do
+  if curl -sf "${SERVER_URL}" >/dev/null 2>&1; then
+    printf ' ready.\n'
+    break
+  fi
+  if [[ "$i" -eq 30 ]]; then
+    printf '\nTimed out waiting for opencode server.\n' >&2
+    exit 1
+  fi
+  printf '.'
+  sleep 1
+done
+
+# ── 3. Spawn one systemd unit per PR (clone + opencode run in parallel) ────────
+declare -a unit_names=()
+
+while IFS= read -r pr; do
+  repo=$(printf '%s' "$pr" | jq -r '.repository.nameWithOwner')
+  branch=$(printf '%s' "$pr" | jq -r '.headRefName')
+  pr_number=$(printf '%s' "$pr" | jq -r '.number')
+  pr_url=$(printf '%s' "$pr" | jq -r '.url')
+
+  hostname=$(printf '%s' "$pr_url" | sed -E 's|https?://([^/]+)/.*|\1|')
+  repo_name=$(basename "$repo")
+  clone_dir="${WORK_DIR}/${hostname}/${repo_name}-${pr_number}"
+
+  # Sanitise repo_name for use in a unit name (replace non-alphanumeric with -)
+  repo_slug=$(printf '%s' "$repo_name" | tr -cs 'A-Za-z0-9' '-' | sed 's/-$//')
+  unit_name="opencode-ci-pr-${repo_slug}-${pr_number}"
+
+  printf 'PR #%s  [%s]  %s\n' "$pr_number" "$repo" "$branch"
+  printf '  clone dir : %s\n' "$clone_dir"
+  printf '  unit      : %s\n' "$unit_name"
+
+  clone_url="git@${hostname}:${repo}.git"
+  # Resolve model at script-write time so it survives nix develop's env replacement
+  resolved_model="${SCRIPT_MODEL_ARG:-${OPENCODE_MEDIUM_MODEL}}"
+
+  # Write the prompt stub (CI logs appended by the run script after cloning)
+  prompt_file="${clone_dir}.prompt"
+  mkdir -p "$(dirname "$clone_dir")"
+  cat >"$prompt_file" <<PROMPT
+PR #${pr_number} in ${repo} (branch: ${branch}) has failing CI.
+PR URL: ${pr_url}
+Repository: ${clone_dir}
+PROMPT
+
+  # Write a per-PR run script so the unit command is clean in the journal.
+  run_script="${clone_dir}.run"
+  mkdir -p "$(dirname "$clone_dir")"
+  cat >"$run_script" <<SCRIPT
+#!/usr/bin/env bash
+set -euo pipefail
+
+# 1. clone / update
+if [[ ! -d $(printf '%q' "$clone_dir")/.git ]]; then
+  git clone --branch $(printf '%q' "$branch") --single-branch $(printf '%q' "$clone_url") $(printf '%q' "$clone_dir")
+else
+  git -C $(printf '%q' "$clone_dir") fetch origin
+  git -C $(printf '%q' "$clone_dir") checkout $(printf '%q' "$branch")
+  git -C $(printf '%q' "$clone_dir") reset --hard origin/$(printf '%q' "$branch")
+fi
+
+# 2. collect CI failure output and append to prompt (truncated to avoid ARG_MAX)
+cd $(printf '%q' "$clone_dir")
+# Resolve the CircleCI project slug once and pass it to both calls below,
+# instead of letting each one re-resolve it via its own cci-slug lookup.
+slug=\$(cci-slug) || slug=""
+printf '\n\n## Current CI failure output\n\n' >> $(printf '%q' "$prompt_file")
+if [[ -n "\$slug" ]]; then
+  cci-wait-on-jobs --no-logs "\$slug" $(printf '%q' "$branch") >> $(printf '%q' "$prompt_file") 2>&1 || true
+  cci-failed-logs "\$slug" $(printf '%q' "$branch")            >> $(printf '%q' "$prompt_file") 2>&1 || true
+else
+  cci-wait-on-jobs --no-logs >> $(printf '%q' "$prompt_file") 2>&1 || true
+  cci-failed-logs            >> $(printf '%q' "$prompt_file") 2>&1 || true
+fi
+# Truncate prompt to 100KB to stay well under ARG_MAX
+truncate_file=$(mktemp)
+tail -c 102400 $(printf '%q' "$prompt_file") > "\$truncate_file"
+mv "\$truncate_file" $(printf '%q' "$prompt_file")
+
+# 3. dispatch opencode
+# Model: use SCRIPT_MODEL_ARG if set (from --model flag), else OPENCODE_MEDIUM_MODEL
+opencode_args=(run --attach $(printf '%q' "$SERVER_URL") --dir $(printf '%q' "$clone_dir") --agent fix-ci --model $(printf '%q' "$resolved_model"))
+prompt=\$(cat $(printf '%q' "$prompt_file"))
+
+if [[ -f $(printf '%q' "$clone_dir")/flake.nix ]]; then
+  exec nix develop $(printf '%q' "$clone_dir") --command opencode "\${opencode_args[@]}" "\$prompt"
+elif [[ -f $(printf '%q' "$clone_dir")/shell.nix ]]; then
+  exec nix-shell $(printf '%q' "$clone_dir")/shell.nix --run "opencode \${opencode_args[*]} \"\$prompt\""
+else
+  exec opencode "\${opencode_args[@]}" "\$prompt"
+fi
+SCRIPT
+  chmod +x "$run_script"
+
+  systemd-run --user \
+    --unit="$unit_name" \
+    --description="fix CI: ${repo} PR#${pr_number} (${branch})" \
+    --remain-after-exit \
+    --property="EnvironmentFile=${ENV_FILE}" \
+    --property="BindsTo=${SERVER_UNIT}.service" \
+    --property="After=${SERVER_UNIT}.service" \
+    "$run_script"
+
+  unit_names+=("$unit_name")
+
+  printf '  dispatched.\n'
+
+done < <(printf '%s' "$failing" | jq -c '.[]')
+
+# ── 4. Spawn watcher unit: stops server once all PR units finish ──────────────
+WATCHER_UNIT="opencode-ci-watcher"
+systemctl --user stop "$WATCHER_UNIT" 2>/dev/null || true
+
+# Build the poll-and-stop command: check each unit's ActiveState every 10s,
+# stop the server once all are no longer active/activating/deactivating.
+unit_checks=""
+for unit in "${unit_names[@]}"; do
+  unit_checks+="while [[ \$(systemctl --user show -p ActiveState --value ${unit}.service 2>/dev/null) =~ ^(active|activating|deactivating)$ ]]; do sleep 10; done; "
+done
+
+systemd-run --user \
+  --unit="$WATCHER_UNIT" \
+  --description="stop opencode CI server when all agents finish" \
+  --property="EnvironmentFile=${ENV_FILE}" \
+  bash -c "${unit_checks}systemctl --user stop ${SERVER_UNIT}"
+
+# ── 5. Print unit names and exit ─────────────────────────────────────────────
+printf '\n%d agent unit(s) running. To follow logs:\n' "${#unit_names[@]}"
+for unit in "${unit_names[@]}"; do
+  printf '  journalctl --user -fu %s\n' "$unit"
+done
+printf '  journalctl --user -fu %s  (server)\n' "$SERVER_UNIT"
+printf '\nServer will stop automatically once all agents finish.\n'
