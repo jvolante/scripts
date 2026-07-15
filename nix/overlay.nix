@@ -17,6 +17,7 @@ let
     jxl-converter      = final.callPackage ./pkgs/jxl-converter      { inherit self; };
     list-cpp-includes  = final.callPackage ./pkgs/list-cpp-includes  { inherit self; };
     list-git-urls      = final.callPackage ./pkgs/list-git-urls      { inherit self; };
+    merge-lockfile     = final.callPackage ./pkgs/merge-lockfile     { inherit self makeShellScript; };
     mkgitremote        = final.callPackage ./pkgs/mkgitremote        { inherit self; };
     mklicense          = final.callPackage ./pkgs/mklicense          { inherit self; };
     mybashrc           = final.callPackage ./pkgs/mybashrc           { inherit self; };

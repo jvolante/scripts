@@ -38,6 +38,7 @@
             git-is-merged     = pkgs'.jvscripts.git-is-merged;
             jxl-converter     = pkgs'.jvscripts.jxl-converter;
             list-cpp-includes = pkgs'.jvscripts.list-cpp-includes;
+            merge-lockfile    = pkgs'.jvscripts.merge-lockfile;
             mkgitremote       = pkgs'.jvscripts.mkgitremote;
             mklicense         = pkgs'.jvscripts.mklicense;
             mybashrc          = pkgs'.jvscripts.mybashrc;

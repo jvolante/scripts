@@ -1,0 +1,338 @@
+#!/usr/bin/env bash
+# Semantic git merge driver for common lock files.
+#
+# Registered as a single git merge driver that auto-detects the format from
+# the file path argument (%P).  Supported formats:
+#
+#   flake.lock      — Nix flake lock file (JSON)
+#   lazy-lock.json  — Neovim lazy.nvim lock file (JSON)
+#   Cargo.lock      — Rust/Cargo lock file (TOML [[package]] blocks)
+#   uv.lock         — Python uv lock file (TOML [[package]] blocks)
+#
+# Usage (as a git merge driver):
+#   merge-lockfile %O %A %B %P
+#
+#   %O  ancestor (base) version — temporary file, read-only
+#   %A  ours — temporary file; overwritten on success, must be left intact on failure
+#   %B  theirs — temporary file, read-only
+#   %P  path of the file being merged (used for format detection)
+#
+# Exit codes:
+#   0   merge succeeded (possibly with user-resolved collisions); %A updated
+#   1   merge failed or user aborted; %A left untouched
+#
+# Configuration (in a repo that wants the driver):
+#
+#   # .gitattributes
+#   flake.lock      merge=lockfile
+#   lazy-lock.json  merge=lockfile
+#   Cargo.lock      merge=lockfile
+#   uv.lock         merge=lockfile
+#
+#   # local or global git config
+#   [merge "lockfile"]
+#       driver = merge-lockfile %O %A %B %P
+#
+# Interactive collision resolution:
+#   When both sides change the same entry (same package / input / plugin),
+#   the user is shown a diff and prompted to choose ours/theirs/abort.
+#   If stdin or stdout is not a TTY (CI, IDE, scripted merge) the driver
+#   bails immediately with exit 1 rather than hanging.
+#   ponytail: non-interactive bail is the ceiling; add pty harness if headless resolution is needed
+
+set -euo pipefail
+
+# ---------------------------------------------------------------------------
+# Arg validation
+# ---------------------------------------------------------------------------
+
+readonly ARGC_EXPECTED=4
+if [[ $# -ne ${ARGC_EXPECTED} ]]; then
+    printf 'merge-lockfile: expected %d args (%%O %%A %%B %%P), got %d\n' "${ARGC_EXPECTED}" "$#" >&2
+    exit 1
+fi
+
+readonly ANCESTOR="$1"
+readonly OURS="$2"
+readonly THEIRS="$3"
+readonly FILEPATH="$4"
+# SC2155: declare separately to avoid masking basename exit status
+LOCK_BASENAME="$(basename "${FILEPATH}")"
+readonly LOCK_BASENAME
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+# Print a diff of two text blocks (passed as strings via temp files)
+_diff_blocks() {
+    local label_a="$1" text_a="$2"
+    local label_b="$3" text_b="$4"
+    local tmp_a tmp_b
+    tmp_a="$(mktemp)"
+    tmp_b="$(mktemp)"
+    printf '%s' "${text_a}" > "${tmp_a}"
+    printf '%s' "${text_b}" > "${tmp_b}"
+    diff -u --label "${label_a}" --label "${label_b}" "${tmp_a}" "${tmp_b}" || true
+    rm -f "${tmp_a}" "${tmp_b}"
+}
+
+# Prompt user for collision resolution on a single key.
+# Writes "ours" or "theirs" to stdout; exits 1 on abort.
+_resolve_interactively() {
+    local key="$1" ours_text="$2" theirs_text="$3"
+    local choice
+
+    printf '\n--- Conflict: %s ---\n' "${key}" >&2
+    _diff_blocks "ours" "${ours_text}" "theirs" "${theirs_text}" >&2
+
+    while true; do
+        printf '\nKeep [o]urs / [t]heirs / [a]bort? ' >&2
+        read -r choice </dev/tty
+        case "${choice}" in
+            o|O|ours)   printf 'ours';   return 0 ;;
+            t|T|theirs) printf 'theirs'; return 0 ;;
+            a|A|abort)  printf 'User aborted merge of %s\n' "${FILEPATH}" >&2; exit 1 ;;
+            *) printf 'Please enter o, t, or a.\n' >&2 ;;
+        esac
+    done
+}
+
+# Check that stdin and stdout are both connected to a terminal.
+_is_interactive() {
+    [[ -t 0 && -t 1 ]]
+}
+
+# ---------------------------------------------------------------------------
+# JSON merge engine (flake.lock, lazy-lock.json)
+# ---------------------------------------------------------------------------
+
+# Merge a JSON lock file whose top-level entries are keyed objects.
+# For flake.lock the working set of keys is .nodes; for lazy-lock.json it is
+# the root object itself.
+#
+# Args: $1=key_expr — jq path expression that yields the keyed object, e.g.
+#         '.' for lazy-lock.json or '.nodes' for flake.lock
+_merge_json() {
+    local key_expr="$1"
+
+    # Validate all three inputs are parseable JSON.
+    for f in "${ANCESTOR}" "${OURS}" "${THEIRS}"; do
+        if ! jq empty "${f}" 2>/dev/null; then
+            printf 'merge-lockfile: %s is not valid JSON, leaving conflict markers\n' "${f}" >&2
+            exit 1
+        fi
+    done
+
+    # Extract keyed maps as compact JSON.
+    local anc_map ours_map theirs_map
+    anc_map="$(  jq -c "${key_expr}" "${ANCESTOR}")"
+    ours_map="$(  jq -c "${key_expr}" "${OURS}")"
+    theirs_map="$(jq -c "${key_expr}" "${THEIRS}")"
+
+    # Collect every key present in any version.
+    local all_keys
+    all_keys="$(jq -rn \
+        --argjson a "${anc_map}" \
+        --argjson o "${ours_map}" \
+        --argjson t "${theirs_map}" \
+        '[$a,$o,$t | keys[]] | unique[]')"
+
+    # Build the merged map; accumulate per-key JSON fragments, then reassemble.
+    # We use associative arrays for the result map and a list of ordered keys.
+    declare -A result_map
+    local ordered_keys=()
+
+    while IFS= read -r key; do
+        local anc_val ours_val theirs_val
+        anc_val="$(  printf '%s' "${anc_map}"    | jq -c --arg k "${key}" '.[$k] // null')"
+        ours_val="$( printf '%s' "${ours_map}"   | jq -c --arg k "${key}" '.[$k] // null')"
+        theirs_val="$(printf '%s' "${theirs_map}" | jq -c --arg k "${key}" '.[$k] // null')"
+
+        local chosen_val
+
+        if [[ "${ours_val}" == "${theirs_val}" ]]; then
+            # Identical — no conflict.
+            chosen_val="${ours_val}"
+        elif [[ "${ours_val}" == "${anc_val}" ]]; then
+            # Only theirs changed.
+            chosen_val="${theirs_val}"
+        elif [[ "${theirs_val}" == "${anc_val}" ]]; then
+            # Only ours changed.
+            chosen_val="${ours_val}"
+        else
+            # Both sides changed this key differently — genuine conflict.
+            if ! _is_interactive; then
+                printf 'merge-lockfile: conflict on key "%s" in %s (non-interactive, bailing)\n' \
+                    "${key}" "${FILEPATH}" >&2
+                exit 1
+            fi
+            local ours_pretty theirs_pretty
+            ours_pretty="$(  printf '%s' "${ours_val}"   | jq '.')"
+            theirs_pretty="$(printf '%s' "${theirs_val}" | jq '.')"
+            local decision
+            decision="$(_resolve_interactively "${key}" "${ours_pretty}" "${theirs_pretty}")"
+            if [[ "${decision}" == "ours" ]]; then
+                chosen_val="${ours_val}"
+            else
+                chosen_val="${theirs_val}"
+            fi
+        fi
+
+        if [[ "${chosen_val}" != "null" ]]; then
+            result_map["${key}"]="${chosen_val}"
+            ordered_keys+=("${key}")
+        fi
+        # If chosen_val is null the key was deleted on one/both sides — omit it.
+    done <<< "${all_keys}"
+
+    # Reconstruct the merged keyed object as compact JSON.
+    local merged_map_json="{}"
+    for k in "${ordered_keys[@]}"; do
+        merged_map_json="$(printf '%s' "${merged_map_json}" \
+            | jq --arg k "${k}" --argjson v "${result_map[${k}]}" '. + {($k): $v}')"
+    done
+
+    # For flake.lock: also union-merge root.inputs (the mapping of input-names
+    # to node-names) so inputs added on either branch are preserved.
+    # For lazy-lock.json (key_expr == '.') there is no separate root to patch.
+    local tmp_out
+    tmp_out="$(mktemp)"
+    if [[ "${key_expr}" == ".nodes" ]]; then
+        # Merge root.inputs: union ours + theirs; on collision theirs wins
+        # (theirs updated the node reference, presumably intentionally).
+        jq -n \
+            --slurpfile ours "${OURS}" \
+            --slurpfile theirs "${THEIRS}" \
+            --argjson merged_nodes "${merged_map_json}" \
+            '$ours[0] * $theirs[0] | .nodes = $merged_nodes' \
+            > "${tmp_out}"
+    else
+        # lazy-lock.json: root IS the keyed map.
+        printf '%s\n' "${merged_map_json}" | jq '.' > "${tmp_out}"
+    fi
+
+    mv "${tmp_out}" "${OURS}"
+}
+
+# ---------------------------------------------------------------------------
+# TOML [[package]] block merge engine (Cargo.lock, uv.lock)
+# ---------------------------------------------------------------------------
+
+# Parse a TOML lock file into a bash associative array.
+# Keys are "name\tversion" strings; values are the full [[package]] text block.
+# The preamble (everything before the first [[package]]) is stored under the
+# special key $PREAMBLE_KEY.
+readonly PREAMBLE_KEY=$'\x01preamble'
+
+_parse_toml_lockfile() {
+    local file="$1"
+    local -n _out_map="$2"  # nameref to the caller's associative array
+
+    local preamble="" current_block="" in_block=0
+    local name="" version=""
+
+    while IFS= read -r line || [[ -n "${line}" ]]; do
+        if [[ "${line}" == '[[package]]' ]]; then
+            # Flush previous block if any.
+            if [[ "${in_block}" -eq 1 && -n "${name}" ]]; then
+                _out_map["${name}"$'\t'"${version}"]="${current_block}"
+            fi
+            current_block="${line}"$'\n'
+            in_block=1
+            name=""
+            version=""
+        elif [[ "${in_block}" -eq 1 ]]; then
+            current_block+="${line}"$'\n'
+            if [[ "${line}" =~ ^name[[:space:]]*=[[:space:]]*\"(.+)\" ]]; then
+                name="${BASH_REMATCH[1]}"
+            elif [[ "${line}" =~ ^version[[:space:]]*=[[:space:]]*\"(.+)\" ]]; then
+                version="${BASH_REMATCH[1]}"
+            fi
+        else
+            preamble+="${line}"$'\n'
+        fi
+    done < "${file}"
+
+    # Flush last block.
+    if [[ "${in_block}" -eq 1 && -n "${name}" ]]; then
+        _out_map["${name}"$'\t'"${version}"]="${current_block}"
+    fi
+    _out_map["${PREAMBLE_KEY}"]="${preamble}"
+}
+
+_merge_toml_lockfile() {
+    declare -A anc_map ours_map theirs_map
+
+    _parse_toml_lockfile "${ANCESTOR}" anc_map
+    _parse_toml_lockfile "${OURS}"     ours_map
+    _parse_toml_lockfile "${THEIRS}"   theirs_map
+
+    # Collect all package keys (excluding preamble sentinel).
+    declare -A all_keys_set
+    for k in "${!anc_map[@]}" "${!ours_map[@]}" "${!theirs_map[@]}"; do
+        [[ "${k}" != "${PREAMBLE_KEY}" ]] && all_keys_set["${k}"]=1
+    done
+
+    declare -A result_map
+    result_map["${PREAMBLE_KEY}"]="${ours_map[${PREAMBLE_KEY}]}"
+
+    for key in "${!all_keys_set[@]}"; do
+        local anc_val="${anc_map[${key}]:-}"
+        local ours_val="${ours_map[${key}]:-}"
+        local theirs_val="${theirs_map[${key}]:-}"
+
+        if [[ "${ours_val}" == "${theirs_val}" ]]; then
+            result_map["${key}"]="${ours_val}"
+        elif [[ "${ours_val}" == "${anc_val}" ]]; then
+            result_map["${key}"]="${theirs_val}"
+        elif [[ "${theirs_val}" == "${anc_val}" ]]; then
+            result_map["${key}"]="${ours_val}"
+        else
+            if ! _is_interactive; then
+                printf 'merge-lockfile: conflict on package "%s" in %s (non-interactive, bailing)\n' \
+                    "${key}" "${FILEPATH}" >&2
+                exit 1
+            fi
+            local decision
+            decision="$(_resolve_interactively "${key}" "${ours_val}" "${theirs_val}")"
+            if [[ "${decision}" == "ours" ]]; then
+                result_map["${key}"]="${ours_val}"
+            else
+                result_map["${key}"]="${theirs_val}"
+            fi
+        fi
+    done
+
+    # Serialize: preamble first, then all package blocks sorted by key.
+    local tmp_out
+    tmp_out="$(mktemp)"
+    printf '%s' "${result_map[${PREAMBLE_KEY}]}" > "${tmp_out}"
+    # Sort keys for a deterministic, diff-friendly output.
+    while IFS= read -r key; do
+        [[ "${key}" == "${PREAMBLE_KEY}" ]] && continue
+        printf '%s\n' "${result_map[${key}]}" >> "${tmp_out}"
+    done < <(printf '%s\n' "${!result_map[@]}" | sort)
+
+    mv "${tmp_out}" "${OURS}"
+}
+
+# ---------------------------------------------------------------------------
+# Dispatch
+# ---------------------------------------------------------------------------
+
+case "${LOCK_BASENAME}" in
+    flake.lock)
+        _merge_json ".nodes"
+        ;;
+    lazy-lock.json)
+        _merge_json "."
+        ;;
+    Cargo.lock|uv.lock)
+        _merge_toml_lockfile
+        ;;
+    *)
+        printf 'merge-lockfile: unrecognised lock file "%s"\n' "${LOCK_BASENAME}" >&2
+        exit 1
+        ;;
+esac

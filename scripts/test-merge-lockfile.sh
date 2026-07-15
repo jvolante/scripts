@@ -1,0 +1,352 @@
+#!/usr/bin/env bash
+# Tests for merge-lockfile.
+#
+# Covers the deterministic paths (auto-merge of disjoint edits, bail on
+# same-key collision in non-interactive mode).  Interactive resolution is
+# not tested here — it requires a pty harness.
+#
+# Usage: ./scripts/test-merge-lockfile.sh
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+DRIVER="${SCRIPT_DIR}/../merge-lockfile"
+PASS=0
+FAIL=0
+
+_pass() { printf 'PASS  %s\n' "$1"; (( PASS++ )) || true; }
+_fail() { printf 'FAIL  %s\n' "$1"; (( FAIL++ )) || true; }
+
+# Run the driver with stdin/stdout closed (non-interactive).
+# Usage: _run_driver ancestor ours theirs filename
+_run_driver() {
+    "${DRIVER}" "$1" "$2" "$3" "$4" </dev/null >/dev/null
+}
+
+# ---------------------------------------------------------------------------
+# lazy-lock.json — disjoint edits auto-merge
+# ---------------------------------------------------------------------------
+
+_test_lazy_disjoint() {
+    local tmp
+    tmp="$(mktemp -d)"
+    trap 'rm -rf "${tmp}"' RETURN
+
+    local anc="${tmp}/anc.json" ours="${tmp}/ours.json" theirs="${tmp}/theirs.json"
+
+    # Ancestor: two plugins
+    jq -n '{"plugin-a":{"branch":"main","commit":"aaa"},"plugin-b":{"branch":"main","commit":"bbb"}}' > "${anc}"
+    # Ours: bumped plugin-a
+    jq -n '{"plugin-a":{"branch":"main","commit":"aaa2"},"plugin-b":{"branch":"main","commit":"bbb"}}' > "${ours}"
+    # Theirs: bumped plugin-b
+    jq -n '{"plugin-a":{"branch":"main","commit":"aaa"},"plugin-b":{"branch":"main","commit":"bbb2"}}' > "${theirs}"
+
+    if _run_driver "${anc}" "${ours}" "${theirs}" "lazy-lock.json"; then
+        local got_a got_b
+        got_a="$(jq -r '.["plugin-a"].commit' "${ours}")"
+        got_b="$(jq -r '.["plugin-b"].commit' "${ours}")"
+        if [[ "${got_a}" == "aaa2" && "${got_b}" == "bbb2" ]]; then
+            _pass "lazy-lock.json: disjoint edits auto-merge"
+        else
+            _fail "lazy-lock.json: disjoint edits — unexpected values (plugin-a=${got_a} plugin-b=${got_b})"
+        fi
+    else
+        _fail "lazy-lock.json: disjoint edits — driver exited non-zero"
+    fi
+}
+
+# ---------------------------------------------------------------------------
+# lazy-lock.json — same-key collision bails non-interactively
+# ---------------------------------------------------------------------------
+
+_test_lazy_collision_noninteractive() {
+    local tmp
+    tmp="$(mktemp -d)"
+    trap 'rm -rf "${tmp}"' RETURN
+
+    local anc="${tmp}/anc.json" ours="${tmp}/ours.json" theirs="${tmp}/theirs.json"
+    local original_ours
+
+    jq -n '{"plugin-a":{"branch":"main","commit":"aaa"}}' > "${anc}"
+    jq -n '{"plugin-a":{"branch":"main","commit":"aaa-ours"}}' > "${ours}"
+    jq -n '{"plugin-a":{"branch":"main","commit":"aaa-theirs"}}' > "${theirs}"
+    original_ours="$(cat "${ours}")"
+
+    if _run_driver "${anc}" "${ours}" "${theirs}" "lazy-lock.json" 2>/dev/null; then
+        _fail "lazy-lock.json: same-key collision — driver should have exited 1 but exited 0"
+    else
+        local after_ours
+        after_ours="$(cat "${ours}")"
+        if [[ "${after_ours}" == "${original_ours}" ]]; then
+            _pass "lazy-lock.json: same-key collision bails and leaves ours intact"
+        else
+            _fail "lazy-lock.json: same-key collision — ours was modified despite bail"
+        fi
+    fi
+}
+
+# ---------------------------------------------------------------------------
+# lazy-lock.json — added-only-on-one-side (new plugin on theirs)
+# ---------------------------------------------------------------------------
+
+_test_lazy_new_entry() {
+    local tmp
+    tmp="$(mktemp -d)"
+    trap 'rm -rf "${tmp}"' RETURN
+
+    local anc="${tmp}/anc.json" ours="${tmp}/ours.json" theirs="${tmp}/theirs.json"
+
+    jq -n '{"plugin-a":{"branch":"main","commit":"aaa"}}' > "${anc}"
+    jq -n '{"plugin-a":{"branch":"main","commit":"aaa"}}' > "${ours}"
+    jq -n '{"plugin-a":{"branch":"main","commit":"aaa"},"plugin-new":{"branch":"main","commit":"nnn"}}' > "${theirs}"
+
+    if _run_driver "${anc}" "${ours}" "${theirs}" "lazy-lock.json"; then
+        local got
+        got="$(jq -r '.["plugin-new"].commit // empty' "${ours}")"
+        if [[ "${got}" == "nnn" ]]; then
+            _pass "lazy-lock.json: new plugin added on theirs is included in merge"
+        else
+            _fail "lazy-lock.json: new plugin from theirs missing (got '${got}')"
+        fi
+    else
+        _fail "lazy-lock.json: new plugin on theirs — driver exited non-zero"
+    fi
+}
+
+# ---------------------------------------------------------------------------
+# Cargo.lock — disjoint edits auto-merge
+# ---------------------------------------------------------------------------
+
+_test_cargo_disjoint() {
+    local tmp
+    tmp="$(mktemp -d)"
+    trap 'rm -rf "${tmp}"' RETURN
+
+    local anc="${tmp}/anc" ours="${tmp}/ours" theirs="${tmp}/theirs"
+
+    cat > "${anc}" <<'EOF'
+# This file is automatically @generated by Cargo.
+# It is not intended for manual editing.
+version = 4
+
+[[package]]
+name = "foo"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "abc123"
+
+[[package]]
+name = "bar"
+version = "2.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "def456"
+EOF
+    # Ours: bumped foo
+    sed 's/abc123/abc999/' "${anc}" > "${ours}"
+    # Theirs: bumped bar
+    sed 's/def456/def999/' "${anc}" > "${theirs}"
+
+    if _run_driver "${anc}" "${ours}" "${theirs}" "Cargo.lock"; then
+        local got_foo got_bar
+        got_foo="$(grep -A5 'name = "foo"' "${ours}" | grep checksum | grep -o '"[^"]*"' | tr -d '"')"
+        got_bar="$(grep -A5 'name = "bar"' "${ours}" | grep checksum | grep -o '"[^"]*"' | tr -d '"')"
+        if [[ "${got_foo}" == "abc999" && "${got_bar}" == "def999" ]]; then
+            _pass "Cargo.lock: disjoint edits auto-merge"
+        else
+            _fail "Cargo.lock: disjoint edits — unexpected values (foo=${got_foo} bar=${got_bar})"
+        fi
+    else
+        _fail "Cargo.lock: disjoint edits — driver exited non-zero"
+    fi
+}
+
+# ---------------------------------------------------------------------------
+# Cargo.lock — same-package collision bails non-interactively
+# ---------------------------------------------------------------------------
+
+_test_cargo_collision_noninteractive() {
+    local tmp
+    tmp="$(mktemp -d)"
+    trap 'rm -rf "${tmp}"' RETURN
+
+    local anc="${tmp}/anc" ours="${tmp}/ours" theirs="${tmp}/theirs"
+    local original_ours
+
+    cat > "${anc}" <<'EOF'
+version = 4
+
+[[package]]
+name = "foo"
+version = "1.0.0"
+checksum = "base"
+EOF
+    sed 's/base/ours-change/' "${anc}" > "${ours}"
+    sed 's/base/theirs-change/' "${anc}" > "${theirs}"
+    original_ours="$(cat "${ours}")"
+
+    if _run_driver "${anc}" "${ours}" "${theirs}" "Cargo.lock" 2>/dev/null; then
+        _fail "Cargo.lock: same-package collision — driver should have exited 1 but exited 0"
+    else
+        local after_ours
+        after_ours="$(cat "${ours}")"
+        if [[ "${after_ours}" == "${original_ours}" ]]; then
+            _pass "Cargo.lock: same-package collision bails and leaves ours intact"
+        else
+            _fail "Cargo.lock: same-package collision — ours was modified despite bail"
+        fi
+    fi
+}
+
+# ---------------------------------------------------------------------------
+# uv.lock — disjoint edits auto-merge
+# ---------------------------------------------------------------------------
+
+_test_uv_disjoint() {
+    local tmp
+    tmp="$(mktemp -d)"
+    trap 'rm -rf "${tmp}"' RETURN
+
+    local anc="${tmp}/anc" ours="${tmp}/ours" theirs="${tmp}/theirs"
+
+    cat > "${anc}" <<'EOF'
+version = 1
+revision = 1
+requires-python = ">=3.10"
+
+[[package]]
+name = "requests"
+version = "2.28.0"
+source = { registry = "https://pypi.org/simple" }
+
+[[package]]
+name = "numpy"
+version = "1.24.0"
+source = { registry = "https://pypi.org/simple" }
+EOF
+    sed 's/requests.*\n.*version = "2.28.0"//' "${anc}" > /dev/null  # sanity; actual edits below
+    sed 's/2.28.0/2.29.0/' "${anc}" > "${ours}"
+    sed 's/1.24.0/1.25.0/' "${anc}" > "${theirs}"
+
+    if _run_driver "${anc}" "${ours}" "${theirs}" "uv.lock"; then
+        local got_req got_np
+        got_req="$(grep -A3 'name = "requests"' "${ours}" | grep version | grep -o '"[0-9.]*"' | tr -d '"')"
+        got_np="$(grep -A3 'name = "numpy"' "${ours}" | grep version | grep -o '"[0-9.]*"' | tr -d '"')"
+        if [[ "${got_req}" == "2.29.0" && "${got_np}" == "1.25.0" ]]; then
+            _pass "uv.lock: disjoint edits auto-merge"
+        else
+            _fail "uv.lock: disjoint edits — unexpected values (requests=${got_req} numpy=${got_np})"
+        fi
+    else
+        _fail "uv.lock: disjoint edits — driver exited non-zero"
+    fi
+}
+
+# ---------------------------------------------------------------------------
+# flake.lock — disjoint input bumps auto-merge
+# ---------------------------------------------------------------------------
+
+_test_flake_disjoint() {
+    local tmp
+    tmp="$(mktemp -d)"
+    trap 'rm -rf "${tmp}"' RETURN
+
+    local anc="${tmp}/anc.json" ours="${tmp}/ours.json" theirs="${tmp}/theirs.json"
+
+    jq -n '{
+        "version": 7,
+        "nodes": {
+            "root": { "inputs": { "nixpkgs": "nixpkgs", "home-manager": "home-manager" } },
+            "nixpkgs": { "locked": { "rev": "aaa", "lastModified": 1000 } },
+            "home-manager": { "locked": { "rev": "bbb", "lastModified": 2000 } }
+        }
+    }' > "${anc}"
+
+    # Ours: bumped nixpkgs
+    jq '.nodes.nixpkgs.locked.rev = "aaa2" | .nodes.nixpkgs.locked.lastModified = 1001' "${anc}" > "${ours}"
+    # Theirs: bumped home-manager
+    jq '.nodes["home-manager"].locked.rev = "bbb2" | .nodes["home-manager"].locked.lastModified = 2001' "${anc}" > "${theirs}"
+
+    if _run_driver "${anc}" "${ours}" "${theirs}" "flake.lock"; then
+        local got_nix got_hm
+        got_nix="$(jq -r '.nodes.nixpkgs.locked.rev' "${ours}")"
+        got_hm="$( jq -r '.nodes["home-manager"].locked.rev' "${ours}")"
+        if [[ "${got_nix}" == "aaa2" && "${got_hm}" == "bbb2" ]]; then
+            _pass "flake.lock: disjoint input bumps auto-merge"
+        else
+            _fail "flake.lock: disjoint bumps — unexpected values (nixpkgs=${got_nix} home-manager=${got_hm})"
+        fi
+    else
+        _fail "flake.lock: disjoint bumps — driver exited non-zero"
+    fi
+}
+
+# ---------------------------------------------------------------------------
+# flake.lock — same input collision bails non-interactively
+# ---------------------------------------------------------------------------
+
+_test_flake_collision_noninteractive() {
+    local tmp
+    tmp="$(mktemp -d)"
+    trap 'rm -rf "${tmp}"' RETURN
+
+    local anc="${tmp}/anc.json" ours="${tmp}/ours.json" theirs="${tmp}/theirs.json"
+    local original_ours
+
+    jq -n '{
+        "version": 7,
+        "nodes": {
+            "root": { "inputs": { "nixpkgs": "nixpkgs" } },
+            "nixpkgs": { "locked": { "rev": "base", "lastModified": 1000 } }
+        }
+    }' > "${anc}"
+    jq '.nodes.nixpkgs.locked.rev = "ours-rev"' "${anc}" > "${ours}"
+    jq '.nodes.nixpkgs.locked.rev = "theirs-rev"' "${anc}" > "${theirs}"
+    original_ours="$(cat "${ours}")"
+
+    if _run_driver "${anc}" "${ours}" "${theirs}" "flake.lock" 2>/dev/null; then
+        _fail "flake.lock: same-input collision — driver should have exited 1 but exited 0"
+    else
+        local after_ours
+        after_ours="$(cat "${ours}")"
+        if [[ "${after_ours}" == "${original_ours}" ]]; then
+            _pass "flake.lock: same-input collision bails and leaves ours intact"
+        else
+            _fail "flake.lock: same-input collision — ours was modified despite bail"
+        fi
+    fi
+}
+
+# ---------------------------------------------------------------------------
+# Unknown filename → exit 1
+# ---------------------------------------------------------------------------
+
+_test_unknown_filename() {
+    local tmp
+    tmp="$(mktemp -d)"
+    trap 'rm -rf "${tmp}"' RETURN
+
+    local f="${tmp}/f"
+    touch "${f}"
+    if _run_driver "${f}" "${f}" "${f}" "package-lock.json" 2>/dev/null; then
+        _fail "unknown filename — driver should have exited 1"
+    else
+        _pass "unknown filename exits 1"
+    fi
+}
+
+# ---------------------------------------------------------------------------
+# Run all tests
+# ---------------------------------------------------------------------------
+
+_test_lazy_disjoint
+_test_lazy_collision_noninteractive
+_test_lazy_new_entry
+_test_cargo_disjoint
+_test_cargo_collision_noninteractive
+_test_uv_disjoint
+_test_flake_disjoint
+_test_flake_collision_noninteractive
+_test_unknown_filename
+
+printf '\n%d passed, %d failed\n' "${PASS}" "${FAIL}"
+[[ "${FAIL}" -eq 0 ]]

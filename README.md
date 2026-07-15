@@ -242,6 +242,62 @@ Check if a git branch has been merged into another branch, detecting regular mer
 2. **Rebase merge:** Compares patch-ids of all commits
 3. **Squash merge:** Matches cumulative diff against target commits
 
+### merge-lockfile
+
+Semantic git merge driver for common lock files. Auto-merges disjoint edits
+(each branch touches different packages/inputs/plugins) and prompts
+interactively when both sides change the same entry. Falls back to exit 1
+without modifying the file in non-interactive contexts (CI, IDE).
+
+**Supported formats:**
+
+| File | Key unit |
+|---|---|
+| `flake.lock` | `.nodes[key]` (Nix flake inputs) |
+| `lazy-lock.json` | top-level plugin entry (Neovim lazy.nvim) |
+| `Cargo.lock` | `[[package]]` block by name + version |
+| `uv.lock` | `[[package]]` block by name + version |
+
+**Setup (in each repo that wants the driver):**
+
+```ini
+# .gitattributes
+flake.lock      merge=lockfile
+lazy-lock.json  merge=lockfile
+Cargo.lock      merge=lockfile
+uv.lock         merge=lockfile
+```
+
+```bash
+# git config (local or global)
+git config merge.lockfile.driver 'merge-lockfile %O %A %B %P'
+```
+
+**Collision resolution:**
+
+When both branches genuinely change the same entry, the driver shows a diff
+and prompts:
+
+```
+--- Conflict: nixpkgs ---
+--- ours
++++ theirs
+...
+
+Keep [o]urs / [t]heirs / [a]bort?
+```
+
+Choosing `a` (abort) leaves the file completely untouched and exits 1 so
+normal git conflict markers are preserved. Choosing `o` or `t` stages that
+resolution; the file is only written after all collisions in the file are
+resolved.
+
+**Test:**
+
+```bash
+./scripts/test-merge-lockfile.sh
+```
+
 ---
 
 ## Bash Configuration
