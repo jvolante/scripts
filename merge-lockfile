@@ -10,7 +10,10 @@
 #   uv.lock         — Python uv lock file (TOML [[package]] blocks)
 #
 # Usage (as a git merge driver):
-#   merge-lockfile %O %A %B %P
+#   merge-lockfile [--on-conflict=ours|theirs] %O %A %B %P
+#
+#   --on-conflict=ours    resolve all true collisions by keeping ours (non-interactive)
+#   --on-conflict=theirs  resolve all true collisions by keeping theirs (non-interactive)
 #
 #   %O  ancestor (base) version — temporary file, read-only
 #   %A  ours — temporary file; overwritten on success, must be left intact on failure
@@ -29,26 +32,40 @@
 #   Cargo.lock      merge=lockfile
 #   uv.lock         merge=lockfile
 #
-#   # local or global git config
+#   # local or global git config — interactive (default):
 #   [merge "lockfile"]
 #       driver = merge-lockfile %O %A %B %P
 #
-# Interactive collision resolution:
-#   When both sides change the same entry (same package / input / plugin),
-#   the user is shown a diff and prompted to choose ours/theirs/abort.
-#   If stdin or stdout is not a TTY (CI, IDE, scripted merge) the driver
-#   bails immediately with exit 1 rather than hanging.
-#   ponytail: non-interactive bail is the ceiling; add pty harness if headless resolution is needed
+#   # non-interactive CI — always keep ours on conflict:
+#   [merge "lockfile"]
+#       driver = merge-lockfile --on-conflict=ours %O %A %B %P
+#
+# Collision policy (true conflicts where both sides changed the same entry):
+#   --on-conflict=ours    keep ours, no prompt
+#   --on-conflict=theirs  keep theirs, no prompt
+#   (neither flag)        prompt interactively if TTY, else bail with exit 1
 
 set -euo pipefail
 
 # ---------------------------------------------------------------------------
-# Arg validation
+# Arg parsing
 # ---------------------------------------------------------------------------
+
+# Optional --on-conflict=ours|theirs flag; empty string means "interactive or bail".
+CONFLICT_POLICY=""
+while [[ $# -gt 0 && "${1}" == --* ]]; do
+    case "$1" in
+        --on-conflict=ours)   CONFLICT_POLICY="ours";   shift ;;
+        --on-conflict=theirs) CONFLICT_POLICY="theirs"; shift ;;
+        *) printf 'merge-lockfile: unknown flag: %s\n' "$1" >&2; exit 1 ;;
+    esac
+done
+readonly CONFLICT_POLICY
 
 readonly ARGC_EXPECTED=4
 if [[ $# -ne ${ARGC_EXPECTED} ]]; then
-    printf 'merge-lockfile: expected %d args (%%O %%A %%B %%P), got %d\n' "${ARGC_EXPECTED}" "$#" >&2
+    printf 'merge-lockfile: expected %d positional args (%%O %%A %%B %%P), got %d\n' "${ARGC_EXPECTED}" "$#" >&2
+    printf 'usage: merge-lockfile [--on-conflict=ours|theirs] %%O %%A %%B %%P\n' >&2
     exit 1
 fi
 
@@ -162,20 +179,28 @@ _merge_json() {
             chosen_val="${ours_val}"
         else
             # Both sides changed this key differently — genuine conflict.
-            if ! _is_interactive; then
+            if [[ -n "${CONFLICT_POLICY}" ]]; then
+                if [[ "${CONFLICT_POLICY}" == "ours" ]]; then
+                    chosen_val="${ours_val}"
+                else
+                    chosen_val="${theirs_val}"
+                fi
+            elif ! _is_interactive; then
                 printf 'merge-lockfile: conflict on key "%s" in %s (non-interactive, bailing)\n' \
                     "${key}" "${FILEPATH}" >&2
                 exit 1
             fi
-            local ours_pretty theirs_pretty
-            ours_pretty="$(  printf '%s' "${ours_val}"   | jq '.')"
-            theirs_pretty="$(printf '%s' "${theirs_val}" | jq '.')"
-            local decision
-            decision="$(_resolve_interactively "${key}" "${ours_pretty}" "${theirs_pretty}")"
-            if [[ "${decision}" == "ours" ]]; then
-                chosen_val="${ours_val}"
-            else
-                chosen_val="${theirs_val}"
+            if [[ -z "${chosen_val:-}" ]]; then
+                local ours_pretty theirs_pretty
+                ours_pretty="$(  printf '%s' "${ours_val}"   | jq '.')"
+                theirs_pretty="$(printf '%s' "${theirs_val}" | jq '.')"
+                local decision
+                decision="$(_resolve_interactively "${key}" "${ours_pretty}" "${theirs_pretty}")"
+                if [[ "${decision}" == "ours" ]]; then
+                    chosen_val="${ours_val}"
+                else
+                    chosen_val="${theirs_val}"
+                fi
             fi
         fi
 
@@ -289,17 +314,24 @@ _merge_toml_lockfile() {
         elif [[ "${theirs_val}" == "${anc_val}" ]]; then
             result_map["${key}"]="${ours_val}"
         else
-            if ! _is_interactive; then
+            if [[ -n "${CONFLICT_POLICY}" ]]; then
+                if [[ "${CONFLICT_POLICY}" == "ours" ]]; then
+                    result_map["${key}"]="${ours_val}"
+                else
+                    result_map["${key}"]="${theirs_val}"
+                fi
+            elif ! _is_interactive; then
                 printf 'merge-lockfile: conflict on package "%s" in %s (non-interactive, bailing)\n' \
                     "${key}" "${FILEPATH}" >&2
                 exit 1
-            fi
-            local decision
-            decision="$(_resolve_interactively "${key}" "${ours_val}" "${theirs_val}")"
-            if [[ "${decision}" == "ours" ]]; then
-                result_map["${key}"]="${ours_val}"
             else
-                result_map["${key}"]="${theirs_val}"
+                local decision
+                decision="$(_resolve_interactively "${key}" "${ours_val}" "${theirs_val}")"
+                if [[ "${decision}" == "ours" ]]; then
+                    result_map["${key}"]="${ours_val}"
+                else
+                    result_map["${key}"]="${theirs_val}"
+                fi
             fi
         fi
     done

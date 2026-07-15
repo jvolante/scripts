@@ -335,6 +335,58 @@ _test_unknown_filename() {
 }
 
 # ---------------------------------------------------------------------------
+# --on-conflict=ours|theirs flag
+# ---------------------------------------------------------------------------
+
+_test_on_conflict_ours() {
+    local tmp
+    tmp="$(mktemp -d)"
+    trap 'rm -rf "${tmp}"' RETURN
+
+    local anc="${tmp}/anc.json" ours="${tmp}/ours.json" theirs="${tmp}/theirs.json"
+
+    jq -n '{"plugin-a":{"branch":"main","commit":"base"}}' > "${anc}"
+    jq -n '{"plugin-a":{"branch":"main","commit":"ours-rev"}}' > "${ours}"
+    jq -n '{"plugin-a":{"branch":"main","commit":"theirs-rev"}}' > "${theirs}"
+
+    if "${DRIVER}" --on-conflict=ours "${anc}" "${ours}" "${theirs}" "lazy-lock.json" </dev/null >/dev/null; then
+        local got
+        got="$(jq -r '.["plugin-a"].commit' "${ours}")"
+        if [[ "${got}" == "ours-rev" ]]; then
+            _pass "--on-conflict=ours: collision resolved to ours"
+        else
+            _fail "--on-conflict=ours: expected 'ours-rev', got '${got}'"
+        fi
+    else
+        _fail "--on-conflict=ours: driver exited non-zero"
+    fi
+}
+
+_test_on_conflict_theirs() {
+    local tmp
+    tmp="$(mktemp -d)"
+    trap 'rm -rf "${tmp}"' RETURN
+
+    local anc="${tmp}/anc.json" ours="${tmp}/ours.json" theirs="${tmp}/theirs.json"
+
+    jq -n '{"plugin-a":{"branch":"main","commit":"base"}}' > "${anc}"
+    jq -n '{"plugin-a":{"branch":"main","commit":"ours-rev"}}' > "${ours}"
+    jq -n '{"plugin-a":{"branch":"main","commit":"theirs-rev"}}' > "${theirs}"
+
+    if "${DRIVER}" --on-conflict=theirs "${anc}" "${ours}" "${theirs}" "lazy-lock.json" </dev/null >/dev/null; then
+        local got
+        got="$(jq -r '.["plugin-a"].commit' "${ours}")"
+        if [[ "${got}" == "theirs-rev" ]]; then
+            _pass "--on-conflict=theirs: collision resolved to theirs"
+        else
+            _fail "--on-conflict=theirs: expected 'theirs-rev', got '${got}'"
+        fi
+    else
+        _fail "--on-conflict=theirs: driver exited non-zero"
+    fi
+}
+
+# ---------------------------------------------------------------------------
 # Run all tests
 # ---------------------------------------------------------------------------
 
@@ -347,6 +399,8 @@ _test_uv_disjoint
 _test_flake_disjoint
 _test_flake_collision_noninteractive
 _test_unknown_filename
+_test_on_conflict_ours
+_test_on_conflict_theirs
 
 printf '\n%d passed, %d failed\n' "${PASS}" "${FAIL}"
 [[ "${FAIL}" -eq 0 ]]
